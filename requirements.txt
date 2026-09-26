@@ -1,0 +1,9 @@
+streamlit
+pandas
+numpy
+joblib
+requests
+beautifulsoup4
+scikit-learn
+lightgbm
+streamlit-autorefresh
