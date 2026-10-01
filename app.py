@@ -123,7 +123,7 @@ def normalize_race_id(value):
         return f"{match.group(1)}-{int(match.group(2)):02d}"
     return text
 
-def fetch_live_odds(date_str, venue):
+def fetch_live_odds(date_str, venue,race_no=None):
     body = {
         "operationName": "racing",
         "variables": {
@@ -451,7 +451,7 @@ if PREDICTION_CSV_PATH.is_file():
         # 執行賠率抓取邏輯
         if auto_refresh or manual_refresh:
             with st.spinner(f"正在讀取第 {target_race} 場即時賠率…"):
-                live_by_race, server_updated_at, error = fetch_live_odds(api_date, venue_code)
+                live_by_race, server_updated_at, error = fetch_live_odds(api_date, venue_code,int(target_race))
 
             if live_by_race:
                 df_temp = st.session_state['df_data'].copy()
