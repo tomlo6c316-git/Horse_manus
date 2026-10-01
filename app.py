@@ -129,7 +129,7 @@ def fetch_live_odds(date_str, venue):
         "variables": {
             "date": date_str,
             "venueCode": venue,
-            "raceNo": None,
+            "raceNo": race_no,
             "oddsTypes": ["WIN", "PLA"],
         },
         "query": ODDS_QUERY,
@@ -450,7 +450,7 @@ if PREDICTION_CSV_PATH.is_file():
 
         # 執行賠率抓取邏輯
         if auto_refresh or manual_refresh:
-            with st.spinner("正在讀取當日所有場次的 WIN／PLACE 即時賠率…"):
+            with st.spinner(f"正在讀取第 {target_race} 場即時賠率…"):
                 live_by_race, server_updated_at, error = fetch_live_odds(api_date, venue_code)
 
             if live_by_race:
