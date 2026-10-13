@@ -1,4 +1,4 @@
-import streamlit as st
+aimport streamlit as st
 import pandas as pd
 import numpy as np
 import os
@@ -765,7 +765,20 @@ with tab2:
             if p3_bets > 0:
                 c1, c2, c3, c4 = st.columns(4)
                 c1.metric("總投注注數", f"{p3_bets} 注"); c2.metric("命中注數", f"{p3_hits} 注"); c3.metric("總成本", f"${p3_invested:,.0f}"); c4.metric("總回收", f"${p3_return:,.1f}", f"ROI: {((p3_return - p3_invested) / p3_invested)*100:.2f}%")
-                st.dataframe(pd.DataFrame(p3_records), use_container_width=True, hide_index=True)
-                
+                # 準備好你要顯示的資料表
+radar_df = pd.DataFrame({
+    '馬號': rdf['馬號'], '馬名': rdf['馬名'], '檔位': rdf['排位檔位'], 
+    '獨賠': rdf['獨贏賠率'].round(1), '位賠': rdf['位置賠率'].round(1),
+    '獨贏EV': rdf['win_ev'].round(2), '位置EV': rdf['place_ev'].round(2),
+    '流向': rdf['資金流向']
+})
+
+# 加上漸層顏色 (cmap='YlGn' 代表黃到綠，'Reds' 代表淺紅到深紅)
+styled_radar = radar_df.style.background_gradient(cmap='YlGn', subset=['獨贏EV', '位置EV']) \
+                             .background_gradient(cmap='Reds', subset=['獨賠'])
+
+# 顯示這張帶有熱力圖的精美表格
+st.dataframe(styled_radar, use_container_width=True, hide_index=True)
+
         with sub_tab5:
             st.info("請於賽前預測分頁下單後，再至此處查看模擬結算。")
