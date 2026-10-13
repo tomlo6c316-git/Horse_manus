@@ -1,0 +1,11 @@
+streamlit
+pandas
+numpy
+joblib
+requests
+scikit-learn
+lightgbm
+streamlit-autorefresh
+lxml
+html5lib
+beautifulsoup4
