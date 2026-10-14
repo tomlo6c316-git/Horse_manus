@@ -400,6 +400,7 @@ with tab1:
     if recommendations: st.dataframe(pd.DataFrame(recommendations), hide_index=True)
     
     # 🎯 熱力圖雷達表
+        # 🎯 熱力圖雷達表 (免套件原生安全版)
     rdf = df[df['賽事編號'].map(extract_race_no) == target_race].copy()
     st.markdown(f"#### 🔍 第 {target_race} 場 深度熱力雷達")
     if not rdf.empty:
@@ -407,14 +408,38 @@ with tab1:
         rdf = rdf.sort_values(by=sort_col, ascending=False)
         radar_df = pd.DataFrame({
             '馬號': rdf['馬號'], '馬名': rdf['馬名'], '檔位': rdf['排位檔位'], 
-            'AI勝率': (rdf['pred_win_prob']*100).round(1).astype(str)+'%',
-            'AI入位率': (rdf['pred_place_prob']*100).round(1).astype(str)+'%',
+            'AI勝率': (rdf['pred_win_prob']*100).round(1),
+            'AI入位率': (rdf['pred_place_prob']*100).round(1),
             '獨賠': rdf['獨贏賠率'].round(1), '位賠': rdf['位置賠率'].round(1),
             '獨贏EV': rdf['win_ev'].round(2), '位置EV': rdf['place_ev'].round(2),
-            '流向': rdf['資金流向']
+            '流向': rdf['資金流向'],
+            '建議獨注': rdf['suggested_stake_win'].apply(lambda x: f"${x:.0f}")
         })
-        styled_radar = radar_df.style.background_gradient(cmap='YlGn', subset=['獨贏EV', '位置EV']).background_gradient(cmap='Reds', subset=['獨賠'])
-        st.dataframe(styled_radar, use_container_width=True, hide_index=True)
+
+        # 自訂免套件熱力上色函數：高 EV 自動標示深綠底白字，中段標示暗黃底
+        def color_ev_cells(val):
+            if pd.isna(val): return ''
+            if val >= 2.5: return 'background-color: #1b5e20; color: #ffffff; font-weight: bold;'
+            elif val >= 1.5: return 'background-color: #2e7d32; color: #ffffff;'
+            elif val >= 1.1: return 'background-color: #558b2f; color: #ffffff;'
+            return ''
+
+        styled_radar = radar_df.style.map(color_ev_cells, subset=['獨贏EV', '位置EV'])
+
+        st.dataframe(
+            styled_radar,
+            column_config={
+                "AI勝率": st.column_config.ProgressColumn("AI勝率", format="%.1f%%", min_value=0, max_value=60),
+                "AI入位率": st.column_config.ProgressColumn("AI入位率", format="%.1f%%", min_value=0, max_value=100),
+                "獨贏EV": st.column_config.NumberColumn("獨贏EV", format="%.2f"),
+                "位置EV": st.column_config.NumberColumn("位置EV", format="%.2f"),
+                "獨賠": st.column_config.NumberColumn("獨賠", format="%.1f"),
+                "位賠": st.column_config.NumberColumn("位賠", format="%.1f"),
+            },
+            use_container_width=True,
+            hide_index=True
+        )
+
 
 # ==========================================
 # 分頁 2: 歷史回測
