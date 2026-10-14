@@ -9,3 +9,4 @@ streamlit-autorefresh
 lxml
 html5lib
 beautifulsoup4
+matplotlib
