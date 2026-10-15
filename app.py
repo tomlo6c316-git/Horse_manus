@@ -507,7 +507,68 @@ if st.sidebar.button("📥 抓取並產出完賽 CSV", use_container_width=True,
             mime="text/csv",
             use_container_width=True
         )
+        # ==========================================
+# 🔄 歷史大表 CSV 一鍵合併更新工具
+# ==========================================
+st.sidebar.markdown("---")
+st.sidebar.header("🔄 歷史大表合併工具")
+st.sidebar.caption("上傳剛抓下的完賽 CSV，系統會自動與現有歷史大表合併並去除重複紀錄。")
 
+new_csv_files = st.sidebar.file_uploader(
+    "上傳新完賽 CSV (可多選)", 
+    type=['csv'], 
+    accept_multiple_files=True,
+    key="merge_csv_uploader"
+)
+
+if new_csv_files and st.sidebar.button("⚡ 合併並產出最新歷史大表", use_container_width=True):
+    hist_path = APP_DIR / 'hkjc_all_seasons_features.csv'
+    dfs_to_merge = []
+    
+    # 1. 讀取現有的歷史大表
+    if hist_path.exists():
+        try:
+            base_df = pd.read_csv(hist_path, encoding='utf-8-sig', low_memory=False)
+        except Exception:
+            base_df = pd.read_csv(hist_path, encoding='cp950', low_memory=False)
+        dfs_to_merge.append(base_df)
+        old_len = len(base_df)
+    else:
+        old_len = 0
+        st.sidebar.warning("⚠️ 找不到現有大表，將僅合併上傳的檔案。")
+        
+    # 2. 讀取所有上傳的新 CSV
+    for f in new_csv_files:
+        try:
+            sub_df = pd.read_csv(f, encoding='utf-8-sig')
+        except Exception:
+            f.seek(0)
+            sub_df = pd.read_csv(f, encoding='cp950')
+        dfs_to_merge.append(sub_df)
+        
+    if dfs_to_merge:
+        # 3. 合併、去重並按賽事編號排序
+        merged_df = pd.concat(dfs_to_merge, ignore_index=True)
+        
+        # 統一賽事編號與馬號格式，確保去重精準
+        if '賽事編號' in merged_df.columns and '馬號' in merged_df.columns:
+            merged_df['_r_key'] = merged_df['賽事編號'].astype(str).str.strip()
+            merged_df['_h_key'] = merged_df['馬號'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            merged_df = merged_df.drop_duplicates(subset=['_r_key', '_h_key'], keep='last')
+            merged_df = merged_df.sort_values(by=['_r_key']).drop(columns=['_r_key', '_h_key']).reset_index(drop=True)
+            
+        new_len = len(merged_df)
+        added_rows = new_len - old_len
+        
+        merged_bytes = merged_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+        st.sidebar.success(f"✅ 合併完成！原 {old_len:,} 筆 ➔ 現 {new_len:,} 筆 (淨新增 {added_rows:,} 筆)")
+        st.sidebar.download_button(
+            label="⬇️ 下載最新 hkjc_all_seasons_features.csv",
+            data=merged_bytes,
+            file_name="hkjc_all_seasons_features.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
 # ==========================================
 # HKJC 新版 GraphQL：一次取得當日所有場次 WIN / PLACE 賠率
 # ==========================================
