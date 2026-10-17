@@ -1298,7 +1298,10 @@ with tab1:
             st.session_state['odds_last_status'] = f"✅ 成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
             st.session_state['odds_server_time'] = server_updated_at
             st.session_state['odds_last_error'] = None
-            st.rerun()
+            
+            # ✅ 加上這行：只有當你手動按按鈕時才強制重刷，自動更新時交給 st_autorefresh 倒數即可
+            if manual_refresh:
+                st.rerun()
         else:
             st.session_state['odds_last_error'] = f"⚠️ 無法取得賠率：{error}"
             st.session_state['odds_last_status'] = None
