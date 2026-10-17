@@ -610,13 +610,13 @@ ODDS_QUERY = """query racing($date: String,$venueCode: String, $oddsTypes: [Odds
 }"""
 
 GRAPHQL_HEADERS = {
-    "Accept": "*/*",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7",
     "Content-Type": "application/json",
     "Origin": "https://bet.hkjc.com",
-    "Referer": "https://bet.hkjc.com/",
-    "User-Agent": "Mozilla/5.0",
+    "Referer": "https://bet.hkjc.com/ch/racing/wp",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 }
-
 def normalize_horse_no(value):
     if pd.isna(value):
         return ""
@@ -637,66 +637,81 @@ def normalize_race_id(value):
         return f"{match.group(1)}-{int(match.group(2)):02d}"
     return text
 
-def fetch_live_odds(date_str, venue):
-    body = {
-        "operationName": "racing",
-        "variables": {
-            "date": date_str,
-            "venueCode": venue,
-            "raceNo": None,
-            "oddsTypes": ["WIN", "PLA"],
-        },
-        "query": ODDS_QUERY,
-    }
-    try:
-        resp = requests.post(
-            GRAPHQL_URL,
-            headers=GRAPHQL_HEADERS,
-            json=body,
-            timeout=20,
-        )
-        resp.raise_for_status()
-        payload = resp.json()
-        if payload.get("errors"):
-            return None, None, f"GraphQL 錯誤：{payload['errors']}"
+def fetch_live_odds(date_str, venue=None):
+    # 自動嘗試：先查指定場地，若無結果則自動切換查另一個場地 (ST / HV)，避免選錯場地抓不到！
+    venues_to_try = [venue] if venue in ("ST", "HV") else ["ST", "HV"]
+    if "ST" in venues_to_try and "HV" not in venues_to_try:
+        venues_to_try.append("HV")
+    elif "HV" in venues_to_try and "ST" not in venues_to_try:
+        venues_to_try.append("ST")
 
-        meetings = (payload.get("data") or {}).get("raceMeetings") or []
-        if not meetings:
-            return None, None, "找不到該日期／場地的賽事資料（可能尚未開盤或日期錯誤）。"
-
-        odds_by_race = {}
-        timestamps = []
-        for pool in meetings[0].get("pmPools") or []:
-            pool_type = str(pool.get("oddsType", "")).upper()
-            if pool_type not in ("WIN", "PLA"):
+    last_error = "找不到賽事資料"
+    for v_code in venues_to_try:
+        body = {
+            "operationName": "racing",
+            "variables": {
+                "date": date_str,
+                "venueCode": v_code,
+                "raceNo": None,
+                "oddsTypes": ["WIN", "PLA"],
+            },
+            "query": ODDS_QUERY,
+        }
+        try:
+            resp = requests.post(
+                GRAPHQL_URL,
+                headers=GRAPHQL_HEADERS,
+                json=body,
+                timeout=15,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if payload.get("errors"):
+                last_error = f"GraphQL 錯誤：{payload['errors']}"
                 continue
-            if pool.get("lastUpdateTime"):
-                timestamps.append(pool["lastUpdateTime"])
 
-            race_numbers = (pool.get("leg") or {}).get("races") or []
-            for race_number in race_numbers:
-                race_number = int(race_number)
-                market = odds_by_race.setdefault(
-                    race_number, {"WIN": {}, "PLA": {}}
-                )
-                for node in pool.get("oddsNodes") or []:
-                    horse_no = normalize_horse_no(node.get("combString"))
-                    odds_value = str(node.get("oddsValue")).strip()
-                    
-                    if horse_no and odds_value not in ("None", "", "SCR"):
-                        try:
-                            market[pool_type][horse_no] = float(odds_value)
-                        except ValueError:
-                            pass
+            meetings = (payload.get("data") or {}).get("raceMeetings") or []
+            if not meetings:
+                last_error = f"日期 {date_str} ({v_code}) 尚無開盤資料。"
+                continue
 
-        if not odds_by_race:
-            return None, None, "賽事有回應，但目前尚無可用 WIN／PLACE 賠率。"
-        return odds_by_race, (max(timestamps) if timestamps else None), None
+            odds_by_race = {}
+            timestamps = []
+            for meeting in meetings:
+                for pool in meeting.get("pmPools") or []:
+                    pool_type = str(pool.get("oddsType", "")).upper()
+                    if pool_type not in ("WIN", "PLA"):
+                        continue
+                    if pool.get("lastUpdateTime"):
+                        timestamps.append(pool["lastUpdateTime"])
 
-    except requests.RequestException as exc:
-        return None, None, f"連線錯誤：{exc}"
-    except (ValueError, TypeError, KeyError) as exc:
-        return None, None, f"解析回應錯誤：{exc}"
+                    race_numbers = (pool.get("leg") or {}).get("races") or []
+                    for race_number in race_numbers:
+                        race_number = int(race_number)
+                        market = odds_by_race.setdefault(
+                            race_number, {"WIN": {}, "PLA": {}}
+                        )
+                        for node in pool.get("oddsNodes") or []:
+                            horse_no = normalize_horse_no(node.get("combString"))
+                            odds_value = str(node.get("oddsValue")).strip()
+                            
+                            if horse_no and odds_value not in ("None", "", "SCR", "---"):
+                                try:
+                                    market[pool_type][horse_no] = float(odds_value)
+                                except ValueError:
+                                    pass
+
+            if odds_by_race:
+                return odds_by_race, (max(timestamps) if timestamps else None), None
+            else:
+                last_error = f"賽事 ({v_code}) 已建立，但馬會尚未開出 WIN/PLA 賠率。"
+
+        except requests.RequestException as exc:
+            last_error = f"連線被拒或逾時 ({v_code})：{exc}"
+        except (ValueError, TypeError, KeyError) as exc:
+            last_error = f"解析錯誤：{exc}"
+
+    return None, None, last_error
 
 # ==========================================
 # 決定讀取哪一份賽卡資料
@@ -822,10 +837,11 @@ edited_df = st.data_editor(
 )
 
 # 同步手動修改的賠率與跑法回 session_state['df_data']
-st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce').fillna(10.0)
-st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce').fillna(1.5)
-st.session_state['df_data']['跑法'] = edited_df['跑法']
-
+# 只有當非 API 剛更新完的狀態下，才同步手動修改的表格內容
+if not st.session_state.pop('_just_updated_from_api', False):
+    st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce').fillna(10.0)
+    st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce').fillna(1.5)
+    st.session_state['df_data']['跑法'] = edited_df['跑法']
 df = st.session_state['df_data'].copy()
 
 # 側邊欄提供隨時下載「包含目前已凍結買時賠率與跑法」的完整賽卡快照
@@ -1289,16 +1305,13 @@ with tab1:
                 st.session_state['baseline_locked_time'] = f"首次自動鎖定 ({datetime.now(hk_timezone).strftime('%H:%M:%S')})"
 
             st.session_state['df_data'] = df_temp
-            st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
-            skip_msg = f"（已保護跳過凍結場次：{', '.join(skipped_frozen)}）" if skipped_frozen else ""
-            st.session_state['odds_last_status'] = f"✅ 成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
-            st.session_state['odds_server_time'] = server_updated_at
-            st.session_state['odds_last_error'] = None
-            if manual_refresh: st.rerun()
-        else:
-            st.session_state['odds_last_error'] = f"⚠️ 無法取得賠率：{error}"
-            st.session_state['odds_last_status'] = None
-            if manual_refresh: st.rerun()
+         st.session_state['_just_updated_from_api'] = True
+         st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
+         skip_msg = f"（已保護跳過凍結場次：{', '.join(skipped_frozen)}）" if skipped_frozen else ""
+         st.session_state['odds_last_status'] = f"✅ 成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
+         st.session_state['odds_server_time'] = server_updated_at
+         st.session_state['odds_last_error'] = None
+         st.rerun()
 
     locked_time_str = st.session_state.get('baseline_locked_time', '未鎖定')
     form_mode_str = "🔥 真實近況與同程算分" if use_dynamic_form else "🎯 1004 爆冷模式 (固定常數算分)"
