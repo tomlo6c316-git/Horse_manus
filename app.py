@@ -1305,13 +1305,18 @@ with tab1:
                 st.session_state['baseline_locked_time'] = f"首次自動鎖定 ({datetime.now(hk_timezone).strftime('%H:%M:%S')})"
 
             st.session_state['df_data'] = df_temp
-         st.session_state['_just_updated_from_api'] = True
-         st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
-         skip_msg = f"（已保護跳過凍結場次：{', '.join(skipped_frozen)}）" if skipped_frozen else ""
-         st.session_state['odds_last_status'] = f"✅ 成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
-         st.session_state['odds_server_time'] = server_updated_at
-         st.session_state['odds_last_error'] = None
-         st.rerun()
+            st.session_state['_just_updated_from_api'] = True
+            st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
+            skip_msg = f"（已保護跳過凍結場次：{', '.join(skipped_frozen)}）" if skipped_frozen else ""
+            st.session_state['odds_last_status'] = f"✅ 成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
+            st.session_state['odds_server_time'] = server_updated_at
+            st.session_state['odds_last_error'] = None
+            st.rerun()
+        else:
+            st.session_state['odds_last_error'] = f"⚠️ 無法取得賠率：{error}"
+            st.session_state['odds_last_status'] = None
+            if manual_refresh:
+                st.rerun()
 
     locked_time_str = st.session_state.get('baseline_locked_time', '未鎖定')
     form_mode_str = "🔥 真實近況與同程算分" if use_dynamic_form else "🎯 1004 爆冷模式 (固定常數算分)"
