@@ -637,6 +637,8 @@ def normalize_race_id(value):
         return f"{match.group(1)}-{int(match.group(2)):02d}"
     return text
 
+import time  # 確保檔案最上方有 import time
+
 def fetch_live_odds(date_str, venue=None):
     # 自動嘗試：先查指定場地，若無結果則自動切換查另一個場地 (ST / HV)
     venues_to_try = [venue] if venue in ("ST", "HV") else ["ST", "HV"]
@@ -645,7 +647,7 @@ def fetch_live_odds(date_str, venue=None):
     elif "HV" in venues_to_try and "ST" not in venues_to_try:
         venues_to_try.append("ST")
 
-    # 使用 Session 保持連線，極大化請求速度
+    # 使用 Session 保持連線
     session = requests.Session()
     session.headers.update(GRAPHQL_HEADERS)
     last_error = "找不到賽事資料"
@@ -655,7 +657,7 @@ def fetch_live_odds(date_str, venue=None):
         timestamps = []
         has_actual_odds = False
         
-        # 🚀 終極破解馬會分頁限制：指定 raceNo 逐場抓取！(1~14場)
+        # 逐場抓取 (1~14場)
         for r_no in range(1, 15):
             body = {
                 "operationName": "racing",
@@ -670,17 +672,20 @@ def fetch_live_odds(date_str, venue=None):
             try:
                 resp = session.post(GRAPHQL_URL, json=body, timeout=5)
                 if resp.status_code != 200:
+                    time.sleep(0.2)
                     continue
                 
                 payload = resp.json()
                 
                 meetings = (payload.get("data") or {}).get("raceMeetings") or []
                 if not meetings:
-                    break  # 如果第一場就找不到賽事，代表這天這個場地沒跑馬，提早跳出換場地
+                    time.sleep(0.2)
+                    continue  # ❌ 絕對不能用 break！改成 continue 讓它繼續嘗試下一場
                     
                 pools = meetings[0].get("pmPools") or []
                 if not pools:
-                    continue  # 這場次可能不存在（例如今天只有 10 場，查到第 11 場就會空），繼續試下一個數字
+                    time.sleep(0.2)
+                    continue 
 
                 for pool in pools:
                     pool_type = str(pool.get("oddsType", "")).upper()
@@ -707,6 +712,9 @@ def fetch_live_odds(date_str, venue=None):
                                     pass
             except Exception as exc:
                 pass  # 忽略單場的錯誤，保證迴圈繼續掃描下一場
+            
+            # 🛡️ 關鍵防護：每次請求後停頓 0.2 秒，防止被 Cloudflare 當作機器人阻擋
+            time.sleep(0.2)
         
         # 必須真的有抓到任何賠率數字才算成功
         if has_actual_odds:
@@ -714,8 +722,7 @@ def fetch_live_odds(date_str, venue=None):
         elif odds_by_race:
             last_error = f"連線成功 ({v_code})，但系統內暫無真實賠率！"
 
-    return None, None, last_error
-# 決定讀取哪一份賽卡資料
+    return None, None, last_error# 決定讀取哪一份賽卡資料
 # ==========================================
 fetched_prediction_df = st.session_state.get('fetched_prediction_df')
 hk_timezone = timezone(timedelta(hours=8))
