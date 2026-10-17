@@ -848,9 +848,11 @@ st.sidebar.download_button(
 # === 計算早盤 vs 臨場賠率變動 (落飛追蹤) ===
 baseline_map = st.session_state.get('baseline_odds_map', {})
 df['_horse_uid'] = df.apply(lambda r: f"{normalize_race_id(r['賽事編號'])}_{normalize_horse_no(r['馬號'])}", axis=1)
-df['基準賠率'] = df['_horse_uid'].map(baseline_map).fillna(df['獨贏賠率'])
-df['基準賠率'] = pd.to_numeric(df['基準賠率'], errors='coerce').fillna(df['獨贏賠率'])
+# 🛡️ 強制轉換型態：確保兩者都是純數字 (float)，徹底剷除 PyArrow 型態衝突
+df['獨贏賠率'] = pd.to_numeric(df['獨贏賠率'], errors='coerce').astype(float)
+df['基準賠率'] = pd.to_numeric(df['_horse_uid'].map(baseline_map), errors='coerce').fillna(df['獨贏賠率']).astype(float)
 
+# 安全計算落飛幅度
 df['odds_drop_pct'] = ((df['基準賠率'] - df['獨贏賠率']) / df['基準賠率'].replace(0, np.nan)).fillna(0.0) * 100.0
 
 def get_odds_move_badge(pct):
