@@ -645,62 +645,65 @@ def fetch_live_odds(date_str, venue=None):
     elif "HV" in venues_to_try and "ST" not in venues_to_try:
         venues_to_try.append("ST")
 
+    session = requests.Session()
+    session.headers.update(GRAPHQL_HEADERS)
     last_error = "找不到賽事資料"
+
     for v_code in venues_to_try:
-        body = {
-            "operationName": "racing",
-            "variables": {"date": date_str, "venueCode": v_code, "raceNo": None, "oddsTypes": ["WIN", "PLA"]},
-            "query": ODDS_QUERY,
-        }
-        try:
-            resp = requests.post(GRAPHQL_URL, headers=GRAPHQL_HEADERS, json=body, timeout=15)
-            resp.raise_for_status()
-            payload = resp.json()
-            
-            meetings = (payload.get("data") or {}).get("raceMeetings") or []
-            if not meetings:
-                last_error = f"日期 {date_str} ({v_code}) 尚無開盤資料。"
-                continue
+        odds_by_race = {}
+        timestamps = []
+        has_actual_odds = False
+        
+        # 🚀 破解馬會 12 Pools 限制：將 WIN 與 PLA 拆開請求！
+        # 這樣每次請求最多只有 11 個彩池 (香港最多11場)，完美繞過 6 場被切斷的限制
+        for pool_type_query in [["WIN"], ["PLA"]]:
+            body = {
+                "operationName": "racing",
+                "variables": {"date": date_str, "venueCode": v_code, "raceNo": None, "oddsTypes": pool_type_query},
+                "query": ODDS_QUERY,
+            }
+            try:
+                resp = session.post(GRAPHQL_URL, json=body, timeout=10)
+                resp.raise_for_status()
+                payload = resp.json()
+                
+                meetings = (payload.get("data") or {}).get("raceMeetings") or []
+                if not meetings:
+                    continue
 
-            odds_by_race = {}
-            timestamps = []
-            has_actual_odds = False  # 🛡️ 嚴格防呆鎖：確認真的有抓到賠率數字！
+                for meeting in meetings:
+                    for pool in meeting.get("pmPools") or []:
+                        pool_type = str(pool.get("oddsType", "")).upper()
+                        if pool_type not in ("WIN", "PLA"): continue
+                        if pool.get("lastUpdateTime"):
+                            timestamps.append(pool["lastUpdateTime"])
 
-            for meeting in meetings:
-                for pool in meeting.get("pmPools") or []:
-                    pool_type = str(pool.get("oddsType", "")).upper()
-                    if pool_type not in ("WIN", "PLA"): continue
-                    if pool.get("lastUpdateTime"):
-                        timestamps.append(pool["lastUpdateTime"])
-
-                    race_numbers = (pool.get("leg") or {}).get("races") or []
-                    for race_number in race_numbers:
-                        race_number = int(race_number)
-                        market = odds_by_race.setdefault(race_number, {"WIN": {}, "PLA": {}})
-                        
-                        for node in pool.get("oddsNodes") or []:
-                            horse_no = normalize_horse_no(node.get("combString"))
-                            odds_value = str(node.get("oddsValue")).strip()
+                        race_numbers = (pool.get("leg") or {}).get("races") or []
+                        for race_number in race_numbers:
+                            race_number = int(race_number)
+                            market = odds_by_race.setdefault(race_number, {"WIN": {}, "PLA": {}})
                             
-                            # 🛡️ 排除所有空值、無效值與退賽馬
-                            if horse_no and odds_value not in ("None", "", "SCR", "---", "0", "0.0"):
-                                try:
-                                    market[pool_type][horse_no] = float(odds_value)
-                                    has_actual_odds = True  # 只要有一匹馬有賠率，就視為成功
-                                except ValueError:
-                                    pass
+                            for node in pool.get("oddsNodes") or []:
+                                horse_no = normalize_horse_no(node.get("combString"))
+                                odds_value = str(node.get("oddsValue")).strip()
+                                
+                                # 🛡️ 嚴格排除退賽與空值
+                                if horse_no and odds_value not in ("None", "", "SCR", "---", "0", "0.0"):
+                                    try:
+                                        market[pool_type][horse_no] = float(odds_value)
+                                        has_actual_odds = True
+                                    except ValueError:
+                                        pass
+            except Exception as exc:
+                last_error = f"發生錯誤 ({v_code})：{exc}"
+        
+        # 必須真的有抓到任何賠率數字才算成功
+        if has_actual_odds:
+            return odds_by_race, (max(timestamps) if timestamps else None), None
+        elif odds_by_race:
+            last_error = f"連線成功 ({v_code})，但系統內暫無真實賠率！"
 
-            # 必須真的有賠率數字才算成功
-            if has_actual_odds:
-                return odds_by_race, (max(timestamps) if timestamps else None), None
-            else:
-                last_error = f"連線成功 ({v_code})，但馬會系統內無賠率！(原因：賽事已結束 或 尚未開盤)"
-
-        except Exception as exc:
-            last_error = f"發生錯誤 ({v_code})：{exc}"
-
-    return None, None, last_error
-# ==========================================
+    return None, None, last_error# ==========================================
 # 決定讀取哪一份賽卡資料
 # ==========================================
 fetched_prediction_df = st.session_state.get('fetched_prediction_df')
