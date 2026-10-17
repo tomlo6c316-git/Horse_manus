@@ -638,7 +638,7 @@ def normalize_race_id(value):
     return text
 
 def fetch_live_odds(date_str, venue=None):
-    # 自動嘗試：先查指定場地，若無結果則自動切換查另一個場地 (ST / HV)，避免選錯場地抓不到！
+    # 自動嘗試：先查指定場地，若無結果則自動切換查另一個場地 (ST / HV)
     venues_to_try = [venue] if venue in ("ST", "HV") else ["ST", "HV"]
     if "ST" in venues_to_try and "HV" not in venues_to_try:
         venues_to_try.append("HV")
@@ -649,27 +649,14 @@ def fetch_live_odds(date_str, venue=None):
     for v_code in venues_to_try:
         body = {
             "operationName": "racing",
-            "variables": {
-                "date": date_str,
-                "venueCode": v_code,
-                "raceNo": None,
-                "oddsTypes": ["WIN", "PLA"],
-            },
+            "variables": {"date": date_str, "venueCode": v_code, "raceNo": None, "oddsTypes": ["WIN", "PLA"]},
             "query": ODDS_QUERY,
         }
         try:
-            resp = requests.post(
-                GRAPHQL_URL,
-                headers=GRAPHQL_HEADERS,
-                json=body,
-                timeout=15,
-            )
+            resp = requests.post(GRAPHQL_URL, headers=GRAPHQL_HEADERS, json=body, timeout=15)
             resp.raise_for_status()
             payload = resp.json()
-            if payload.get("errors"):
-                last_error = f"GraphQL 錯誤：{payload['errors']}"
-                continue
-
+            
             meetings = (payload.get("data") or {}).get("raceMeetings") or []
             if not meetings:
                 last_error = f"日期 {date_str} ({v_code}) 尚無開盤資料。"
@@ -677,42 +664,42 @@ def fetch_live_odds(date_str, venue=None):
 
             odds_by_race = {}
             timestamps = []
+            has_actual_odds = False  # 🛡️ 嚴格防呆鎖：確認真的有抓到賠率數字！
+
             for meeting in meetings:
                 for pool in meeting.get("pmPools") or []:
                     pool_type = str(pool.get("oddsType", "")).upper()
-                    if pool_type not in ("WIN", "PLA"):
-                        continue
+                    if pool_type not in ("WIN", "PLA"): continue
                     if pool.get("lastUpdateTime"):
                         timestamps.append(pool["lastUpdateTime"])
 
                     race_numbers = (pool.get("leg") or {}).get("races") or []
                     for race_number in race_numbers:
                         race_number = int(race_number)
-                        market = odds_by_race.setdefault(
-                            race_number, {"WIN": {}, "PLA": {}}
-                        )
+                        market = odds_by_race.setdefault(race_number, {"WIN": {}, "PLA": {}})
+                        
                         for node in pool.get("oddsNodes") or []:
                             horse_no = normalize_horse_no(node.get("combString"))
                             odds_value = str(node.get("oddsValue")).strip()
                             
-                            if horse_no and odds_value not in ("None", "", "SCR", "---"):
+                            # 🛡️ 排除所有空值、無效值與退賽馬
+                            if horse_no and odds_value not in ("None", "", "SCR", "---", "0", "0.0"):
                                 try:
                                     market[pool_type][horse_no] = float(odds_value)
+                                    has_actual_odds = True  # 只要有一匹馬有賠率，就視為成功
                                 except ValueError:
                                     pass
 
-            if odds_by_race:
+            # 必須真的有賠率數字才算成功
+            if has_actual_odds:
                 return odds_by_race, (max(timestamps) if timestamps else None), None
             else:
-                last_error = f"賽事 ({v_code}) 已建立，但馬會尚未開出 WIN/PLA 賠率。"
+                last_error = f"連線成功 ({v_code})，但馬會系統內無賠率！(原因：賽事已結束 或 尚未開盤)"
 
-        except requests.RequestException as exc:
-            last_error = f"連線被拒或逾時 ({v_code})：{exc}"
-        except (ValueError, TypeError, KeyError) as exc:
-            last_error = f"解析錯誤：{exc}"
+        except Exception as exc:
+            last_error = f"發生錯誤 ({v_code})：{exc}"
 
     return None, None, last_error
-
 # ==========================================
 # 決定讀取哪一份賽卡資料
 # ==========================================
