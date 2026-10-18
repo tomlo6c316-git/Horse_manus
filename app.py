@@ -48,7 +48,7 @@ FEATURE_COLS_15 = [
 ]
 
 @st.cache_resource
-def load_models():
+def load_models_V2():
     win_m = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
     place_m = joblib.load(PLACE_MODEL_PATH) if os.path.exists(PLACE_MODEL_PATH) else None
     return win_m, place_m
