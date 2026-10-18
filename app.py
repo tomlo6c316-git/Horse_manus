@@ -1117,7 +1117,7 @@ if backtest_file is not None:
             matched = int(has_official_result.sum())
             backtest_ready = matched > 0
             if backtest_ready:
-                df_backtest = df_backtest[df_backtest['_result_rank'].notna()].copy()
+                # df_backtest = df_backtest[df_backtest['_result_rank'].notna()].copy()
                 st.sidebar.success(f"✅ {result_source_label}已配對：{matched} 匹")
             else:
                 st.sidebar.warning("未能按賽事編號＋馬號配對到名次。")
