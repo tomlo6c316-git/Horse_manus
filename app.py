@@ -53,7 +53,7 @@ def load_models_V2():
     place_m = joblib.load(PLACE_MODEL_PATH) if os.path.exists(PLACE_MODEL_PATH) else None
     return win_m, place_m
 
-model_win, model_place = load_models()
+model_win, model_place = load_models_V2()
 
 if model_win is None:
     st.error(f"⚠️ 找不到獨贏 AI 模型檔 `{MODEL_PATH}`！請確認模型是否已上傳至正確目錄。")
