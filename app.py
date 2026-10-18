@@ -926,9 +926,9 @@ if hist_stats is not None:
     
     # 🚀 核心切換：決定餵給 AI 模型算分的特徵值
     
-        df['horse_last_rank'] = 6.0
-        df['horse_surface_win_rate'] = 0.08
-        df['horse_dist_win_rate'] = 0.08
+    df['horse_last_rank'] = 6.0
+    df['horse_surface_win_rate'] = 0.08
+    df['horse_dist_win_rate'] = 0.08
     
     df.drop(columns=[
         '_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
