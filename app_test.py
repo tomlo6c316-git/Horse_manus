@@ -48,12 +48,12 @@ FEATURE_COLS_15 = [
 ]
 
 @st.cache_resource
-def load_models():
+def load_models_V2():
     win_m = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
     place_m = joblib.load(PLACE_MODEL_PATH) if os.path.exists(PLACE_MODEL_PATH) else None
     return win_m, place_m
 
-model_win, model_place = load_models()
+model_win, model_place = load_models_V2()
 
 if model_win is None:
     st.error(f"⚠️ 找不到獨贏 AI 模型檔 `{MODEL_PATH}`！請確認模型是否已上傳至正確目錄。")
@@ -72,7 +72,11 @@ def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
         return None
     
     try:
-        hist_df = pd.read_csv(csv_path, low_memory=False)
+        # 🛡️ 自動偵測並容錯讀取編碼，徹底解決亂碼與解碼失敗
+        try:
+            hist_df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
+        except UnicodeDecodeError:
+            hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
         hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
         
@@ -925,11 +929,17 @@ if hist_stats is not None:
     df['real_dist_win_rate'] = df['hist_horse_dist_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
     
     # 🚀 核心切換：決定餵給 AI 模型算分的特徵值
-    
-    df['horse_last_rank'] = 6.0
-    df['horse_surface_win_rate'] = 0.08
-    df['horse_dist_win_rate'] = 0.08
-    
+    if use_dynamic_form:
+        df['horse_last_rank'] = df['real_last_rank']
+        df['horse_surface_win_rate'] = df['real_surface_win_rate']
+        df['horse_dist_win_rate'] = df['real_dist_win_rate']
+    else:
+        # 1004 爆冷模式：維持模型訓練時習慣的固定常數，不因上仗落敗而扣掉黑馬分數！
+        df['horse_last_rank'] = 6.0
+        df['horse_surface_win_rate'] = 0.08
+        df['horse_dist_win_rate'] = 0.08
+
+        
     df.drop(columns=[
         '_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
         'hist_jockey_win_rate', 'hist_trainer_win_rate', 'hist_horse_win_rate', 'hist_combo_win_rate',

@@ -48,12 +48,12 @@ FEATURE_COLS_15 = [
 ]
 
 @st.cache_resource
-def load_models_V2():
+def load_models():
     win_m = joblib.load(MODEL_PATH) if os.path.exists(MODEL_PATH) else None
     place_m = joblib.load(PLACE_MODEL_PATH) if os.path.exists(PLACE_MODEL_PATH) else None
     return win_m, place_m
 
-model_win, model_place = load_models_V2()
+model_win, model_place = load_models()
 
 if model_win is None:
     st.error(f"⚠️ 找不到獨贏 AI 模型檔 `{MODEL_PATH}`！請確認模型是否已上傳至正確目錄。")
@@ -72,11 +72,7 @@ def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
         return None
     
     try:
-        # 🛡️ 自動偵測並容錯讀取編碼，徹底解決亂碼與解碼失敗
-        try:
-            hist_df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
-        except UnicodeDecodeError:
-            hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
+        hist_df = pd.read_csv(csv_path, low_memory=False)
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
         hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
         
@@ -938,8 +934,7 @@ if hist_stats is not None:
         df['horse_last_rank'] = 6.0
         df['horse_surface_win_rate'] = 0.08
         df['horse_dist_win_rate'] = 0.08
-
-        
+    
     df.drop(columns=[
         '_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
         'hist_jockey_win_rate', 'hist_trainer_win_rate', 'hist_horse_win_rate', 'hist_combo_win_rate',
@@ -977,11 +972,70 @@ df['win_ev'] = df['pred_win_prob'] * df['獨贏賠率']
 df['place_ev'] = df['pred_place_prob'] * df['位置賠率']
 df['ev'] = df['win_ev']  # 保持向下相容
 
+# 🚀 3. 計算賽道移欄與檔位偏差懲罰
+def calculate_track_bias(row):
+    penalty = 0.0
+    if row['場地'] == '草地':
+        draw = int(row['排位檔位'])
+        track = str(row.get('賽道', 'A')).upper()
+        dist = int(row['距離'])
+        rc = str(row.get('racecourse_code', 'ST'))
+        if track in ['C', 'C+3', 'B+2', 'C+2']:
+            if draw >= 11: penalty = -0.15
+            elif draw >= 9: penalty = -0.05
+        if rc == 'ST' and dist == 1000:
+            if draw >= 10: penalty = +0.10
+            elif draw <= 4: penalty = -0.10
+    return penalty
+df['track_bias_adj'] = df.apply(calculate_track_bias, axis=1)
 
-# 🚀 3. 計算「抗噪穩定分數」 (僅保留落飛資金追蹤，去除過度人工干預)
+# 🚀 4. 計算近期手風 (Hot Hand) 戰術加成
+def calculate_hot_hand_adj(row):
+    adj = 0.0
+    j_diff = row['recent_jockey_win_rate'] - row['jockey_win_rate']
+    t_diff = row['recent_trainer_win_rate'] - row['trainer_win_rate']
+    if j_diff >= 0.04: adj += 0.05
+    elif j_diff <= -0.04: adj -= 0.05
+    if t_diff >= 0.04: adj += 0.05
+    elif t_diff <= -0.04: adj -= 0.05
+    return adj
+df['hot_hand_adj'] = df.apply(calculate_hot_hand_adj, axis=1)
+
+# 🚀 5. 計算預期步速 (Pace Scenario) 戰術加成
+def calculate_pace_adj(df_in):
+    df_in['pace_adj'] = 0.0
+    df_in['race_pace'] = '🐎 正常'
+    for race_id, group in df_in.groupby('賽事編號'):
+        front_runners = sum(group['跑法'] == '放頭')
+        if front_runners >= 3:
+            pace = "fast"
+            pace_label = '🔥 快步速'
+        elif front_runners <= 1:
+            pace = "slow"
+            pace_label = '🐢 慢步速'
+        else:
+            pace = "normal"
+            pace_label = '🐎 正常'
+            
+        for idx, row in group.iterrows():
+            style = row['跑法']
+            adj = 0.0
+            if pace == "fast":
+                if style == '後上': adj = 0.08
+                elif style == '放頭': adj = -0.06
+            elif pace == "slow":
+                if style == '放頭': adj = 0.08
+                elif style == '後上': adj = -0.05
+            df_in.at[idx, 'pace_adj'] = adj
+            df_in.at[idx, 'race_pace'] = pace_label
+    return df_in
+df = calculate_pace_adj(df)
+
+# 6. 計算雙引擎「抗噪穩定綜合分數」 (結合落飛資金 + 賽道偏差 + 騎練手風 + 預期步速)
 drop_bonus = np.clip(df['odds_drop_pct'] / 100.0, -0.35, 0.30)
-df['smart_score_win'] = df['pred_win_prob'] * (1.0 + drop_bonus)
-df['smart_score_place'] = df['pred_place_prob'] * (1.0 + drop_bonus)
+total_tactical_adj = 1.0 + drop_bonus + df['track_bias_adj'] + df['hot_hand_adj'] + df['pace_adj']
+df['smart_score_win'] = df['pred_win_prob'] * total_tactical_adj
+df['smart_score_place'] = df['pred_place_prob'] * total_tactical_adj
 df['smart_score'] = df['smart_score_win']
 
 # 💰 7. 雙重凱利注碼精算 (獨贏注碼 & 位置注碼)
@@ -1063,7 +1117,7 @@ if backtest_file is not None:
             matched = int(has_official_result.sum())
             backtest_ready = matched > 0
             if backtest_ready:
-                # df_backtest = df_backtest[df_backtest['_result_rank'].notna()].copy()
+                df_backtest = df_backtest[df_backtest['_result_rank'].notna()].copy()
                 st.sidebar.success(f"✅ {result_source_label}已配對：{matched} 匹")
             else:
                 st.sidebar.warning("未能按賽事編號＋馬號配對到名次。")
@@ -1325,7 +1379,9 @@ with tab1:
     # 單場深度資金與實力雷達表 (同時顯示雙模型機率與雙 EV)
     status_tag = f"🔒 已凍結於 {st.session_state['frozen_races'][int(target_race)]}" if is_target_frozen else "🟢 盤口即時更新中"
     race_detail_df = df[df['賽事編號'].map(extract_race_no) == target_race].copy()
-    st.markdown(f"#### 🔍 第 {target_race} 場 — 臨場落飛與雙模型實力深度雷達 ({status_tag})")
+    current_pace_label = race_detail_df['race_pace'].iloc[0] if not race_detail_df.empty else "未知"
+    
+    st.markdown(f"#### 🔍 第 {target_race} 場 — 臨場落飛與雙模型實力深度雷達 ({status_tag} ｜ 預期步速: {current_pace_label})")
     if not race_detail_df.empty:
         if strategy_mode.startswith("🛡️"):
             sort_col_detail = 'smart_score_win'
@@ -1342,6 +1398,8 @@ with tab1:
             '練馬師': race_detail_df['練馬師'],
             '檔位': race_detail_df['排位檔位'],
             '跑法': race_detail_df['跑法'],
+            '步速加成': race_detail_df['pace_adj'].map(lambda x: f"{x*100:+.0f}%" if x != 0 else "-"),
+            '檔位調整': race_detail_df.apply(lambda r: "泥地無移欄" if r.get('場地') == '泥地' else (f"{r['track_bias_adj']*100:+.0f}%" if r['track_bias_adj'] != 0 else "內檔安全"), axis=1),
             '上仗名次': race_detail_df['real_last_rank'].map(lambda x: "新馬/無" if x == 6.5 else f"第 {int(x)} 名"),
             '同程勝率': (race_detail_df['real_dist_win_rate'] * 100).round(1).astype(str) + '%',
             'AI 勝率': (race_detail_df['pred_win_prob'] * 100).round(1).astype(str) + '%',
