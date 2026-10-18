@@ -1320,9 +1320,7 @@ with tab1:
     # 單場深度資金與實力雷達表 (同時顯示雙模型機率與雙 EV)
     status_tag = f"🔒 已凍結於 {st.session_state['frozen_races'][int(target_race)]}" if is_target_frozen else "🟢 盤口即時更新中"
     race_detail_df = df[df['賽事編號'].map(extract_race_no) == target_race].copy()
-    current_pace_label = race_detail_df['race_pace'].iloc[0] if not race_detail_df.empty else "未知"
-    
-    st.markdown(f"#### 🔍 第 {target_race} 場 — 臨場落飛與雙模型實力深度雷達 ({status_tag} ｜ 預期步速: {current_pace_label})")
+    st.markdown(f"#### 🔍 第 {target_race} 場 — 臨場落飛與雙模型實力深度雷達 ({status_tag})")
     if not race_detail_df.empty:
         if strategy_mode.startswith("🛡️"):
             sort_col_detail = 'smart_score_win'
