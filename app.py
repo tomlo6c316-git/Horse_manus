@@ -925,11 +925,17 @@ if hist_stats is not None:
     df['real_dist_win_rate'] = df['hist_horse_dist_win_rate'].fillna(df['horse_win_rate']).fillna(0.06)
     
     # 🚀 核心切換：決定餵給 AI 模型算分的特徵值
-    
-    df['horse_last_rank'] = 6.0
-    df['horse_surface_win_rate'] = 0.08
-    df['horse_dist_win_rate'] = 0.08
-    
+    # 🚀 核心切換：決定餵給 AI 模型算分的特徵值
+    if use_dynamic_form:
+        df['horse_last_rank'] = df['real_last_rank']
+        df['horse_surface_win_rate'] = df['real_surface_win_rate']
+        df['horse_dist_win_rate'] = df['real_dist_win_rate']
+    else:
+        # 1004 爆冷模式：維持模型訓練時習慣的固定常數，不因上仗落敗而扣掉黑馬分數！
+        df['horse_last_rank'] = 6.0
+        df['horse_surface_win_rate'] = 0.08
+        df['horse_dist_win_rate'] = 0.08
+        
     df.drop(columns=[
         '_clean_jockey', '_clean_trainer', '_clean_horse', '_clean_surface', '_clean_dist',
         'hist_jockey_win_rate', 'hist_trainer_win_rate', 'hist_horse_win_rate', 'hist_combo_win_rate',
