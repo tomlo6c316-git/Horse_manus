@@ -72,7 +72,11 @@ def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv'):
         return None
     
     try:
-        hist_df = pd.read_csv(csv_path, low_memory=False)
+        # 🛡️ 自動偵測並容錯讀取編碼，徹底解決亂碼與解碼失敗
+        try:
+            hist_df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
+        except UnicodeDecodeError:
+            hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
         hist_df['numeric_rank'] = pd.to_numeric(hist_df['名次'], errors='coerce')
         hist_df['is_win'] = (hist_df['numeric_rank'] == 1).astype(int)
         
