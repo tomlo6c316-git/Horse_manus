@@ -363,7 +363,7 @@ max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_valu
 
 st.sidebar.markdown("---")
 st.sidebar.header("💰 資金管理 (凱利注碼精算)")
-total_bankroll = st.sidebar.number_input("💵 單日總本金預算 (HKD)", min_value=100, max_value=1000000, value=5000, step=500)
+total_bankroll = st.sidebar.number_input("💵 單日總本金預算 (HKD)", min_value=100, max_value=1000000, value=500, step=500)
 kelly_fraction = st.sidebar.slider("🎛️ 凱利保守係數", 0.05, 1.0, 0.15, 0.05)
 
 # ==========================================
