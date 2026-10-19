@@ -356,7 +356,8 @@ use_dynamic_form = st.sidebar.checkbox(
     value=False,
     help="預設不勾選（🎯 1004 爆冷模式）：AI 算分時維持訓練模型習慣的固定常數 (6.0 / 0.08)，不因馬匹上仗落敗而扣分，專抓反彈大冷門！勾選後則將真實近況納入算分（無論勾選與否，畫面表格都會顯示真實近況供肉眼參考）。"
 )
-min_ev = st.sidebar.slider("最小期望值 (EV 門檻)", 0.0, 6.0, 2.5, 0.1)
+min_win_ev = st.sidebar.slider("🥇 獨贏最小期望值 (Win EV)", 0.0, 6.0, 2.5, 0.1)
+min_place_ev = st.sidebar.slider("🥉 位置最小期望值 (Place EV)", 0.0, 6.0, 1.5, 0.1)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=3.0, help="⚠️ 提示：若使用【🎯 純 AI 機率最高】模式尋找熱門穩膽，建議將此數值調低至 1.0，以免錯殺優質大熱門！(位置彩池會自動將此門檻除以3)")
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=25.0)
 
@@ -1278,8 +1279,8 @@ with tab1:
         freeze_badge = f"🔒 已凍結 ({st.session_state['frozen_races'][r_no]})" if r_no in st.session_state['frozen_races'] else "🟢 即時跳動中"
         
         # 獨贏引擎篩選 與 位置引擎篩選
-        sorted_win = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="win")
-        sorted_place = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+        sorted_win = filter_and_sort_group(group, strategy_mode, min_win_ev, min_odds, max_odds, bet_type="win")
+        sorted_place = filter_and_sort_group(group, strategy_mode, min_place_ev, min_odds, max_odds, bet_type="place")
 
         win_pick = "⚠️ 無達標獨贏馬"
         hot_str = "-"
@@ -1492,7 +1493,7 @@ with tab2:
             win_invested, win_return, win_bets, win_hits = 0, 0, 0, 0
             win_records = []
             for race_id, group in df_backtest.groupby('賽事編號'):
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="win")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_win_ev, min_odds, max_odds, bet_type="win")
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
                     raw_stake = pick.get('suggested_stake_win', 10)
@@ -1545,7 +1546,7 @@ with tab2:
             place_invested, place_return, place_bets, place_hits = 0, 0, 0, 0
             place_records = []
             for race_id, group in df_backtest.groupby('賽事編號'):
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_place_ev, min_odds, max_odds, bet_type="place")
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
                     raw_stake = pick.get('suggested_stake_place', 10)
@@ -1598,7 +1599,7 @@ with tab2:
             qp_invested, qp_return, qp_bets, qp_hits = 0, 0, 0, 0
             qp_records = []
             for race_id, group in df_backtest.groupby('賽事編號'):
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_place_ev, min_odds, max_odds, bet_type="place")
                 if len(sorted_group) >= 2:
                     top1 = sorted_group.iloc[0]
                     top2 = sorted_group.iloc[1]
@@ -1652,7 +1653,7 @@ with tab2:
             p3_records = []
             
             for race_id, group in df_backtest.groupby('賽事編號'):
-                sorted_group = filter_and_sort_group(group, strategy_mode, min_ev, min_odds, max_odds, bet_type="place")
+                sorted_group = filter_and_sort_group(group, strategy_mode, min_place_ev, min_odds, max_odds, bet_type="place")
                 picks = sorted_group.head(3)
                 
                 for _, pick in picks.iterrows():
