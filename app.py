@@ -781,8 +781,14 @@ win_values = df_raw['獨贏賠率']
 if '位置賠率' not in df_raw.columns:
     df_raw['位置賠率'] = 1.0 + (win_values - 1.0) / 3.2
 else:
-    # 如果有欄位但裡面是空的，強制用公式補算
-    df_raw['位置賠率'] = pd.to_numeric(df_raw['位置賠率'], errors='coerce').fillna(1.0 + (win_values - 1.0) / 3.2)
+    # 先將內容轉為數字
+    df_raw['位置賠率'] = pd.to_numeric(df_raw['位置賠率'], errors='coerce')
+    # 🔥 關鍵新增：判斷是否「整欄全部都是 1.5」(這代表是系統爬蟲產生的預設假資料)
+    if (df_raw['位置賠率'] == 1.5).all():
+        df_raw['位置賠率'] = 1.0 + (win_values - 1.0) / 3.2
+    else:
+        # 如果不是整欄 1.5，代表可能有真實賠率，只把裡面的空值 (NaN) 用公式補算
+        df_raw['位置賠率'] = df_raw['位置賠率'].fillna(1.0 + (win_values - 1.0) / 3.2)
 if '賽道' not in df_raw.columns:
     df_raw['賽道'] = 'A'
 if '跑法' not in df_raw.columns:
