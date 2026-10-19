@@ -747,9 +747,9 @@ if fetched_prediction_df is not None and st.session_state.pop('pending_auto_odds
             place_price = race_market.get('PLA', {}).get(horse_no)
             if win_price is not None and win_price > 0:
                 df_raw.at[idx, '獨贏賠率'] = win_price
+                # 🔥 強制使用獨贏賠率推算位置賠率，完全不看官方 place_price
+                df_raw.at[idx, '位置賠率'] = 1.0 + (win_price - 1.0) / 3.2
                 win_count += 1
-            if place_price is not None and place_price > 0:
-                df_raw.at[idx, '位置賠率'] = place_price
                 place_count += 1
         st.session_state['df_data'] = df_raw.copy()
         st.session_state['fetched_prediction_df'] = df_raw.copy()
@@ -1234,9 +1234,10 @@ with tab1:
                 for horse_no, value in markets['WIN'].items():
                     horse_mask = race_mask & (row_horses == horse_no)
                     df_temp.loc[horse_mask, '獨贏賠率'] = value
-                for horse_no, value in markets['PLA'].items():
-                    horse_mask = race_mask & (row_horses == horse_no)
-                    df_temp.loc[horse_mask, '位置賠率'] = value
+                    # 🔥 強制使用最新的獨贏賠率，連動推算位置賠率
+                    df_temp.loc[horse_mask, '位置賠率'] = 1.0 + (value - 1.0) / 3.2
+                    
+                # (原本抓取官方 PLA 的迴圈已被徹底刪除)
 
             if st.session_state.get('baseline_locked_time') == "初始載入值":
                 base_map = {}
