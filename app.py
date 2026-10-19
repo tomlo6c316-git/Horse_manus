@@ -774,9 +774,15 @@ if auto_odds_status:
 # 確保賠率、賽道與跑法欄位存在
 if '獨贏賠率' not in df_raw.columns:
     df_raw['獨贏賠率'] = 10.0
+else:
+    df_raw['獨贏賠率'] = pd.to_numeric(df_raw['獨贏賠率'], errors='coerce').fillna(10.0)
+
+win_values = df_raw['獨贏賠率']
 if '位置賠率' not in df_raw.columns:
-    win_values = pd.to_numeric(df_raw['獨贏賠率'], errors='coerce').fillna(10.0)
     df_raw['位置賠率'] = 1.0 + (win_values - 1.0) / 3.2
+else:
+    # 如果有欄位但裡面是空的，強制用公式補算
+    df_raw['位置賠率'] = pd.to_numeric(df_raw['位置賠率'], errors='coerce').fillna(1.0 + (win_values - 1.0) / 3.2)
 if '賽道' not in df_raw.columns:
     df_raw['賽道'] = 'A'
 if '跑法' not in df_raw.columns:
@@ -827,7 +833,7 @@ edited_df = st.data_editor(
 
 # 同步手動修改的賠率與跑法回 session_state['df_data']
 st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce').fillna(10.0)
-st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce').fillna(1.5)
+st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce').fillna(1.0 + (st.session_state['df_data']['獨贏賠率'] - 1.0) / 3.2)
 st.session_state['df_data']['跑法'] = edited_df['跑法']
 
 df = st.session_state['df_data'].copy()
