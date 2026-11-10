@@ -1,0 +1,133 @@
+{
+  "input": "/home/ubuntu/upload/hkjc_all_seasons_features_backtest_ready_20261101.csv",
+  "rows": 29590,
+  "races": 2433,
+  "date_range": [
+    "2023-09-10",
+    "2026-10-28"
+  ],
+  "cleaning": {
+    "input_rows": 29926,
+    "fully_blank_rows_removed": 0,
+    "duplicate_rows_removed": 0,
+    "nonstarters_excluded": 237,
+    "blank_rank_no_valid_win_odds_excluded": 9,
+    "void_races_excluded": 0,
+    "starter_rows_before_odds_filter": 29689,
+    "eligible_rows": 29590,
+    "eligible_races": 2433,
+    "races_excluded_under_4_starters": 0,
+    "races_excluded_incomplete_or_invalid_win_odds": 11,
+    "place_positive_rows": 7287
+  },
+  "split": {
+    "train_end_exclusive": "2025-11-12",
+    "validation_end_exclusive": "2026-04-08",
+    "train_races": 1674,
+    "validation_races": 364,
+    "test_races": 395,
+    "test_dates": [
+      "2026-04-08",
+      "2026-10-28"
+    ]
+  },
+  "warning": "Source history uses official final odds, not time-stamped pre-race snapshots; holdout does not represent a fixed live-odds decision time.",
+  "legacy_current_classifier": {
+    "races": 395,
+    "top1_win_rate": 0.23544303797468355,
+    "top1_wins": 93,
+    "top3_winner_coverage": 0.4582278481012658,
+    "top3_winner_races": 181,
+    "mean_winner_rank": 4.746835443037975,
+    "median_winner_rank": 4.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number.",
+    "mean_row_probability": 0.2681046352045558,
+    "median_race_probability_sum": 3.17435914106604,
+    "sklearn_warnings": [
+      "Trying to unpickle estimator LabelEncoder from version 1.6.1 when using version 1.9.1. This might lead to breaking code or invalid results. Use at your own risk. For more info please refer to:\nhttps://scikit-learn.org/stable/model_persistence.html#security-maintainability-limitations"
+    ],
+    "row_metrics": {
+      "auc": 0.6599303741408886,
+      "brier": 0.17468857135698995,
+      "log_loss": 0.5869893383012893
+    }
+  },
+  "unweighted_classifier": {
+    "races": 395,
+    "top1_win_rate": 0.28607594936708863,
+    "top1_wins": 113,
+    "top3_winner_coverage": 0.6126582278481013,
+    "top3_winner_races": 242,
+    "mean_winner_rank": 3.6202531645569622,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number.",
+    "best_iteration": 154,
+    "mean_row_probability": 0.08034242641738534,
+    "median_race_probability_sum": 0.9973840428076131,
+    "row_metrics": {
+      "auc": 0.7845399199470798,
+      "brier": 0.06644502805804876,
+      "log_loss": 0.23819023362736605
+    }
+  },
+  "lambdarank": {
+    "races": 395,
+    "top1_win_rate": 0.2936708860759494,
+    "top1_wins": 116,
+    "top3_winner_coverage": 0.6025316455696202,
+    "top3_winner_races": 238,
+    "mean_winner_rank": 3.6050632911392406,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number.",
+    "temperature": 0.13950900823351822,
+    "race_multiclass_log_loss": 2.0681614968722153,
+    "race_multiclass_brier_sum": 0.8286850019415024,
+    "probability_sum_mean": 1.0,
+    "best_iteration": 10,
+    "validation_temperature": 0.13950900823351822
+  },
+  "qp_pair": {
+    "races": 395,
+    "model_top2_both_in_place": 112,
+    "model_top2_both_rate": 0.28354430379746837,
+    "model_top2_at_least_one_place": 326,
+    "market_top2_both_in_place": 110,
+    "market_top2_both_rate": 0.27848101265822783,
+    "place_classifier_best_iteration": 425
+  },
+  "place_model_top1_metrics": {
+    "races": 395,
+    "top1_win_rate": 0.28607594936708863,
+    "top1_wins": 113,
+    "top3_winner_coverage": 0.610126582278481,
+    "top3_winner_races": 241,
+    "mean_winner_rank": 3.6202531645569622,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number."
+  },
+  "legacy_place_model_qp_pair": {
+    "not_compared": true,
+    "reason": "GitHub PLACE模型為dynamic form，但本次候選輸入為fixed form；避免不公平評估。"
+  },
+  "direct_qp_pair_ranker": {
+    "races": 395,
+    "best_pair_both_in_place": 105,
+    "best_pair_both_rate": 0.26582278481012656,
+    "top3_pairs_at_least_one_valid_qp": 212,
+    "top3_pair_coverage_rate": 0.5367088607594936,
+    "best_iteration": 13,
+    "candidate_pair_rows": 28534,
+    "positive_pair_rows": 1183,
+    "note": "每場直接排序所有無序雙馬組合；命中條件為兩馬均按該場有效入位席位入位。"
+  },
+  "market_favorite": {
+    "races": 395,
+    "top1_win_rate": 0.27341772151898736,
+    "top1_wins": 108,
+    "top3_winner_coverage": 0.6151898734177215,
+    "top3_winner_races": 243,
+    "mean_winner_rank": 3.5746835443037974,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number."
+  }
+}

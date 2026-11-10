@@ -1,0 +1,123 @@
+{
+  "input": "/home/ubuntu/upload/hkjc_all_seasons_features_backtest_ready_20261101.csv",
+  "rows": 29590,
+  "races": 2433,
+  "date_range": [
+    "2023-09-10",
+    "2026-10-28"
+  ],
+  "cleaning": {
+    "input_rows": 29926,
+    "fully_blank_rows_removed": 0,
+    "duplicate_rows_removed": 0,
+    "nonstarters_excluded": 237,
+    "blank_rank_no_valid_win_odds_excluded": 9,
+    "void_races_excluded": 0,
+    "starter_rows_before_odds_filter": 29689,
+    "eligible_rows": 29590,
+    "eligible_races": 2433,
+    "races_excluded_under_4_starters": 0,
+    "races_excluded_incomplete_or_invalid_win_odds": 11,
+    "place_positive_rows": 7287
+  },
+  "split": {
+    "train_end_exclusive": "2025-11-12",
+    "validation_end_exclusive": "2026-04-08",
+    "train_races": 1674,
+    "validation_races": 364,
+    "test_races": 395,
+    "test_dates": [
+      "2026-04-08",
+      "2026-10-28"
+    ]
+  },
+  "warning": "Source history uses official final odds, not time-stamped pre-race snapshots; holdout does not represent a fixed live-odds decision time.",
+  "legacy_current_classifier": {
+    "not_compared": true,
+    "reason": "GitHub WIN模型設定為fixed form，本次輸入為dynamic form；避免不公平評估。"
+  },
+  "unweighted_classifier": {
+    "races": 395,
+    "top1_win_rate": 0.2759493670886076,
+    "top1_wins": 109,
+    "top3_winner_coverage": 0.5974683544303797,
+    "top3_winner_races": 236,
+    "mean_winner_rank": 3.640506329113924,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number.",
+    "best_iteration": 148,
+    "mean_row_probability": 0.08034885552337935,
+    "median_race_probability_sum": 1.0003733427014136,
+    "row_metrics": {
+      "auc": 0.7848650648608044,
+      "brier": 0.06652561245956098,
+      "log_loss": 0.2382819899840717
+    }
+  },
+  "lambdarank": {
+    "races": 395,
+    "top1_win_rate": 0.2708860759493671,
+    "top1_wins": 107,
+    "top3_winner_coverage": 0.6050632911392405,
+    "top3_winner_races": 239,
+    "mean_winner_rank": 3.5949367088607596,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number.",
+    "temperature": 0.8785895081762568,
+    "race_multiclass_log_loss": 2.0929504773013834,
+    "race_multiclass_brier_sum": 0.8385255474653429,
+    "probability_sum_mean": 1.0,
+    "best_iteration": 104,
+    "validation_temperature": 0.8785895081762568
+  },
+  "qp_pair": {
+    "races": 395,
+    "model_top2_both_in_place": 110,
+    "model_top2_both_rate": 0.27848101265822783,
+    "model_top2_at_least_one_place": 332,
+    "market_top2_both_in_place": 110,
+    "market_top2_both_rate": 0.27848101265822783,
+    "place_classifier_best_iteration": 396
+  },
+  "place_model_top1_metrics": {
+    "races": 395,
+    "top1_win_rate": 0.28607594936708863,
+    "top1_wins": 113,
+    "top3_winner_coverage": 0.6253164556962025,
+    "top3_winner_races": 247,
+    "mean_winner_rank": 3.589873417721519,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number."
+  },
+  "legacy_place_model_qp_pair": {
+    "races": 395,
+    "model_top2_both_in_place": 122,
+    "model_top2_both_rate": 0.30886075949367087,
+    "model_top2_at_least_one_place": 340,
+    "market_top2_both_in_place": 110,
+    "market_top2_both_rate": 0.27848101265822783,
+    "model_path": "/tmp/hkjc-predictor-source/my_hkjc_place_model.pkl",
+    "warnings": []
+  },
+  "direct_qp_pair_ranker": {
+    "races": 395,
+    "best_pair_both_in_place": 108,
+    "best_pair_both_rate": 0.27341772151898736,
+    "top3_pairs_at_least_one_valid_qp": 212,
+    "top3_pair_coverage_rate": 0.5367088607594936,
+    "best_iteration": 15,
+    "candidate_pair_rows": 28534,
+    "positive_pair_rows": 1183,
+    "note": "每場直接排序所有無序雙馬組合；命中條件為兩馬均按該場有效入位席位入位。"
+  },
+  "market_favorite": {
+    "races": 395,
+    "top1_win_rate": 0.27341772151898736,
+    "top1_wins": 108,
+    "top3_winner_coverage": 0.6151898734177215,
+    "top3_winner_races": 243,
+    "mean_winner_rank": 3.5746835443037974,
+    "median_winner_rank": 3.0,
+    "note": "Exactly one horse selected per race; equal scores are resolved by ascending horse number."
+  }
+}
