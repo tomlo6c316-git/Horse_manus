@@ -1364,9 +1364,34 @@ with tab1:
     race_series = df_raw['賽事編號'].map(extract_race_no)
     races_available = sorted(int(x) for x in race_series.dropna().unique())
     if races_available:
-        target_race = col_r.selectbox("當前操作／查看場次", races_available)
+        target_race = col_r.selectbox("當前操作／查看場次", races_available, key="target_race_select")
     else:
         target_race = col_r.number_input("當前操作／查看場次", min_value=1, max_value=15, value=1, step=1)
+
+    selected_race_rows = df[df['賽事編號'].map(extract_race_no) == int(target_race)].copy()
+    selected_race_win = pd.to_numeric(selected_race_rows.get('獨贏賠率', pd.Series(index=selected_race_rows.index, dtype=float)), errors='coerce')
+    selected_race_valid_win = selected_race_win.gt(1.0)
+    selected_race_scored = (
+        selected_race_rows.get('pred_win_prob', pd.Series(index=selected_race_rows.index, dtype=float)).notna()
+        & selected_race_rows.get('pred_place_prob', pd.Series(index=selected_race_rows.index, dtype=float)).notna()
+    )
+    if not selected_race_rows.empty and not bool(selected_race_scored.any()):
+        missing_horses = selected_race_rows.loc[~selected_race_valid_win, '馬號'].astype(str).tolist()
+        if not selected_race_valid_win.all():
+            missing_text = '、'.join(missing_horses) if missing_horses else '未知'
+            st.warning(
+                f"第 {target_race} 場 AI 勝率／入位率暫無有效分數：目前只有 {int(selected_race_valid_win.sum())}/{len(selected_race_rows)} 匹有有效官方WIN賠率；缺價馬號：{missing_text}。"
+                "此模型需要該場完整WIN盤特徵。請選中本場後按「立即更新目前場次賠率」；若HKJC尚未開盤，稍後再試。系統不會用估算值補價。"
+            )
+        elif not history_features_ok:
+            st.error('本場WIN盤已有有效報價，但History載入失敗，模型分數已停止；請查看左側History錯誤訊息。')
+        else:
+            st.error('本場WIN盤看似完整，但模型仍未產生分數。請檢查模型檔是否成功載入，並查看左側模型載入提示。')
+    elif not selected_race_rows.empty:
+        st.caption(
+            f"第 {target_race} 場模型分數狀態：WIN有效報價 {int(selected_race_valid_win.sum())}/{len(selected_race_rows)} 匹；"
+            f"已有AI分數 {int(selected_race_scored.sum())}/{len(selected_race_rows)} 匹。"
+        )
 
     target_time = col_t.time_input("預定開跑時間", value=datetime.strptime("18:45", "%H:%M").time())
     
