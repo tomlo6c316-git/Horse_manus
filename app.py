@@ -839,9 +839,17 @@ archived_prediction_card = bool(
     and race_date_values.nunique() == 1
     and race_date_values.iloc[0].date() < datetime.now(hk_timezone).date()
 )
+saved_odds_snapshot = bool(
+    fetched_prediction_df is None
+    and SELECTED_CSV_PATH.is_file()
+    and 'bet_odds_updated' in SELECTED_CSV_PATH.stem.lower()
+)
+archived_prediction_card = archived_prediction_card or saved_odds_snapshot
 if fetched_prediction_df is None and not archived_prediction_card:
     df_raw['獨贏賠率'] = np.nan
     df_raw['位置賠率'] = np.nan
+elif saved_odds_snapshot:
+    st.sidebar.warning('已載入保存的落註賠率回測快照：保留檔案內WIN／PLACE價格，不會清空或當作即時更新報價。')
 elif archived_prediction_card:
     st.sidebar.warning('已載入過去賽日預測卡：保留檔案內賠率供歷史命中率回測；不視為目前即時官方報價。')
 
