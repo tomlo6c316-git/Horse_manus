@@ -705,6 +705,10 @@ def normalize_horse_no(value):
     except (ValueError, TypeError):
         return text
 
+def is_scratched(value):
+    text = str(value).strip().upper()
+    return text in {"SCR", "SCRATCH", "SCRATCHED", "退出", "退賽", "已退出", "取消"} or "退出" in text or "SCRATCH" in text
+
 def extract_race_no(value):
     match = re.search(r"-(\d+)\s*$", str(value).strip())
     return int(match.group(1)) if match else None
@@ -756,13 +760,14 @@ def fetch_live_odds(date_str, venue, race_no=None):
             for race_number in race_numbers:
                 race_number = int(race_number)
                 market = odds_by_race.setdefault(
-                    race_number, {"WIN": {}, "PLA": {}}
+                    race_number, {"WIN": {}, "PLA": {}, "SCRATCHED": set()}
                 )
                 for node in pool.get("oddsNodes") or []:
                     horse_no = normalize_horse_no(node.get("combString"))
                     odds_value = str(node.get("oddsValue")).strip()
-                    
-                    if horse_no and odds_value not in ("None", "", "SCR"):
+                    if horse_no and odds_value.upper() == "SCR":
+                        market["SCRATCHED"].add(horse_no)
+                    elif horse_no and odds_value not in ("None", ""):
                         try:
                             market[pool_type][horse_no] = float(odds_value)
                         except ValueError:
@@ -817,6 +822,10 @@ else:
     source_label = '等待抓取HKJC官方排位'
     prediction_signature = 'awaiting-official-racecard'
 
+# 缺少狀態欄時預設仍在陣；只有明確官方SCR或檔案明確標記才視為退出。
+if '參賽狀態' not in df_raw.columns:
+    df_raw['參賽狀態'] = '參賽'
+
 # Historical prediction CSVs are archived model inputs for backtesting. Keep
 # their saved prices; for today's/future repo cards require a fresh HKJC quote.
 race_date_values = pd.Series(dtype='datetime64[ns]')
@@ -844,11 +853,18 @@ if fetched_prediction_df is not None and not archived_prediction_card and st.ses
     with st.spinner(f'排位已載入，正在嘗試取得第 {initial_race} 場 WIN／PLACE 賠率…'):
         odds_by_race, odds_updated_at, odds_error = fetch_live_odds(odds_date, odds_venue, initial_race)
     if odds_by_race:
+        if '參賽狀態' not in df_raw.columns:
+            df_raw['參賽狀態'] = '參賽'
         win_count = place_count = 0
         for idx, runner in df_raw.iterrows():
             race_no = extract_race_no(runner.get('賽事編號', ''))
             horse_no = normalize_horse_no(runner.get('馬號', ''))
             race_market = odds_by_race.get(race_no, {})
+            if horse_no in race_market.get('SCRATCHED', set()):
+                df_raw.at[idx, '參賽狀態'] = '退出'
+                df_raw.at[idx, '獨贏賠率'] = np.nan
+                df_raw.at[idx, '位置賠率'] = np.nan
+                continue
             win_price = race_market.get('WIN', {}).get(horse_no)
             place_price = race_market.get('PLA', {}).get(horse_no)
             if win_price is not None and win_price > 1.0:
@@ -1104,9 +1120,10 @@ if archived_prediction_card:
     # Score only quoted runners; the result file later identifies scratches.
     valid_idx = df.index[price_numeric.gt(1.0)]
 else:
-    complete_races = df.assign(_valid_win_price=price_numeric.gt(1.0)).groupby('賽事編號')['_valid_win_price'].all()
+    scratched_mask = df['參賽狀態'].map(is_scratched)
+    complete_races = df.assign(_eligible_runner_price=price_numeric.gt(1.0) | scratched_mask).groupby('賽事編號')['_eligible_runner_price'].all()
     valid_race_ids = set(complete_races[complete_races].index)
-    valid_idx = df.index[df['賽事編號'].isin(valid_race_ids)]
+    valid_idx = df.index[df['賽事編號'].isin(valid_race_ids) & ~scratched_mask & price_numeric.gt(1.0)]
 if not history_features_ok:
     valid_idx = df.index[:0]
     st.sidebar.error('已停止預測：History未能讀取或計算，不能用預設勝率代替訓練特徵。')
@@ -1370,27 +1387,30 @@ with tab1:
 
     selected_race_rows = df[df['賽事編號'].map(extract_race_no) == int(target_race)].copy()
     selected_race_win = pd.to_numeric(selected_race_rows.get('獨贏賠率', pd.Series(index=selected_race_rows.index, dtype=float)), errors='coerce')
-    selected_race_valid_win = selected_race_win.gt(1.0)
+    selected_race_active = ~selected_race_rows.get('參賽狀態', pd.Series('參賽', index=selected_race_rows.index)).map(is_scratched)
+    selected_race_valid_win = selected_race_win.gt(1.0) & selected_race_active
     selected_race_scored = (
         selected_race_rows.get('pred_win_prob', pd.Series(index=selected_race_rows.index, dtype=float)).notna()
         & selected_race_rows.get('pred_place_prob', pd.Series(index=selected_race_rows.index, dtype=float)).notna()
     )
     if not selected_race_rows.empty and not bool(selected_race_scored.any()):
-        missing_horses = selected_race_rows.loc[~selected_race_valid_win, '馬號'].astype(str).tolist()
-        if not selected_race_valid_win.all():
+        missing_horses = selected_race_rows.loc[selected_race_active & ~selected_race_win.gt(1.0), '馬號'].astype(str).tolist()
+        if selected_race_active.any() and not (selected_race_valid_win | ~selected_race_active).all():
             missing_text = '、'.join(missing_horses) if missing_horses else '未知'
             st.warning(
-                f"第 {target_race} 場 AI 勝率／入位率暫無有效分數：目前只有 {int(selected_race_valid_win.sum())}/{len(selected_race_rows)} 匹有有效官方WIN賠率；缺價馬號：{missing_text}。"
+                f"第 {target_race} 場 AI 勝率／入位率暫無有效分數：目前只有 {int(selected_race_valid_win.sum())}/{int(selected_race_active.sum())} 匹仍參賽馬有有效官方WIN賠率；缺價馬號：{missing_text}。"
                 "此模型需要該場完整WIN盤特徵。請選中本場後按「立即更新目前場次賠率」；若HKJC尚未開盤，稍後再試。系統不會用估算值補價。"
             )
+        elif not selected_race_active.any():
+            st.warning(f'第 {target_race} 場的馬匹均被標記為退出，請確認所選賽卡／HKJC狀態。')
         elif not history_features_ok:
             st.error('本場WIN盤已有有效報價，但History載入失敗，模型分數已停止；請查看左側History錯誤訊息。')
         else:
             st.error('本場WIN盤看似完整，但模型仍未產生分數。請檢查模型檔是否成功載入，並查看左側模型載入提示。')
     elif not selected_race_rows.empty:
         st.caption(
-            f"第 {target_race} 場模型分數狀態：WIN有效報價 {int(selected_race_valid_win.sum())}/{len(selected_race_rows)} 匹；"
-            f"已有AI分數 {int(selected_race_scored.sum())}/{len(selected_race_rows)} 匹。"
+            f"第 {target_race} 場模型分數狀態：WIN有效報價 {int(selected_race_valid_win.sum())}/{int(selected_race_active.sum())} 匹有效參賽馬；"
+            f"已有AI分數 {int((selected_race_scored & selected_race_active).sum())}/{int(selected_race_active.sum())} 匹有效參賽馬。"
         )
 
     target_time = col_t.time_input("預定開跑時間", value=datetime.strptime("18:45", "%H:%M").time())
@@ -1521,10 +1541,21 @@ with tab1:
                     continue
                 updated_races_count += 1
                 race_mask = row_races == r_int
+                scratched_horses = markets.get('SCRATCHED', set())
+                if scratched_horses:
+                    if '參賽狀態' not in df_temp.columns:
+                        df_temp['參賽狀態'] = '參賽'
+                    scratch_mask = race_mask & row_horses.isin(scratched_horses)
+                    df_temp.loc[scratch_mask, '參賽狀態'] = '退出'
+                    df_temp.loc[scratch_mask, ['獨贏賠率', '位置賠率']] = np.nan
                 for horse_no, value in markets['WIN'].items():
+                    if horse_no in scratched_horses:
+                        continue
                     horse_mask = race_mask & (row_horses == horse_no)
                     df_temp.loc[horse_mask, '獨贏賠率'] = value
                 for horse_no, value in markets.get('PLA', {}).items():
+                    if horse_no in scratched_horses:
+                        continue
                     horse_mask = race_mask & (row_horses == horse_no)
                     df_temp.loc[horse_mask, '位置賠率'] = value
 
