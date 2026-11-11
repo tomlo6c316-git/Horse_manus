@@ -35,7 +35,7 @@ if 'simulated_bets' not in st.session_state:
 if 'frozen_races' not in st.session_state:
     st.session_state['frozen_races'] = {}  # 格式: {race_no: "HH:MM:SS"}
 
-ENGINE_VERSION = 'asof-ranker-v1-20261110'
+ENGINE_VERSION = 'asof-ranker-v2-20261111-backtest'
 if st.session_state.get('prediction_engine_version') != ENGINE_VERSION:
     st.session_state.pop('df_data', None)
     st.session_state.pop('prediction_signature', None)
@@ -820,14 +820,27 @@ else:
     source_label = '等待抓取HKJC官方排位'
     prediction_signature = 'awaiting-official-racecard'
 
-# Repo CSV odds have no verifiable quote timestamp/source. Keep the racecard,
-# but require a fresh official HKJC WIN/PLA response before scoring or EV.
-if fetched_prediction_df is None:
+# Historical prediction CSVs are archived model inputs for backtesting. Keep
+# their saved prices; for today's/future repo cards require a fresh HKJC quote.
+race_date_values = pd.Series(dtype='datetime64[ns]')
+if len(df_raw) and '賽事編號' in df_raw.columns:
+    race_date_values = pd.to_datetime(
+        df_raw['賽事編號'].astype(str).str.extract(r'(20\d{6})', expand=False),
+        format='%Y%m%d', errors='coerce'
+    )
+archived_prediction_card = bool(
+    len(df_raw) > 0 and race_date_values.notna().all()
+    and race_date_values.nunique() == 1
+    and race_date_values.iloc[0].date() < datetime.now(hk_timezone).date()
+)
+if fetched_prediction_df is None and not archived_prediction_card:
     df_raw['獨贏賠率'] = np.nan
     df_raw['位置賠率'] = np.nan
+elif archived_prediction_card:
+    st.sidebar.warning('已載入過去賽日預測卡：保留檔案內賠率供歷史命中率回測；不視為目前即時官方報價。')
 
 auto_odds_status = None
-if fetched_prediction_df is not None and st.session_state.pop('pending_auto_odds_fetch', False):
+if fetched_prediction_df is not None and not archived_prediction_card and st.session_state.pop('pending_auto_odds_fetch', False):
     odds_date = st.session_state.get('fetched_prediction_date', race_date_choice).strftime('%Y-%m-%d')
     odds_venue = str(df_raw['racecourse_code'].iloc[0])
     initial_race = min(df_raw['賽事編號'].map(extract_race_no).dropna().astype(int)) if df_raw['賽事編號'].map(extract_race_no).notna().any() else 1
@@ -1089,9 +1102,14 @@ X_win = make_form_matrix(df, win_dynamic_form)
 X_place = make_form_matrix(df, place_dynamic_form)
 X_qp = make_form_matrix(df, qp_dynamic_form)
 price_numeric = pd.to_numeric(df['獨贏賠率'], errors='coerce')
-complete_races = df.assign(_valid_win_price=price_numeric.gt(1.0)).groupby('賽事編號')['_valid_win_price'].all()
-valid_race_ids = set(complete_races[complete_races].index)
-valid_idx = df.index[df['賽事編號'].isin(valid_race_ids)]
+if archived_prediction_card:
+    # In archived cards, zero/missing prices commonly belong to non-starters.
+    # Score only quoted runners; the result file later identifies scratches.
+    valid_idx = df.index[price_numeric.gt(1.0)]
+else:
+    complete_races = df.assign(_valid_win_price=price_numeric.gt(1.0)).groupby('賽事編號')['_valid_win_price'].all()
+    valid_race_ids = set(complete_races[complete_races].index)
+    valid_idx = df.index[df['賽事編號'].isin(valid_race_ids)]
 if not history_features_ok:
     valid_idx = df.index[:0]
     st.sidebar.error('已停止預測：History未能讀取或計算，不能用預設勝率代替訓練特徵。')
@@ -1216,6 +1234,8 @@ def place_slots_for_race(group):
 df_backtest = df.copy()
 backtest_ready = False
 backtest_cutoff_excluded_races = 0
+backtest_incomplete_excluded_races = 0
+backtest_final_odds_match_rate = np.nan
 if backtest_file is not None:
     try:
         try:
@@ -1253,6 +1273,18 @@ if backtest_file is not None:
             df_backtest = df_backtest.merge(
                 result_map, on=['_race_key', '_horse_key'], how='left', validate='many_to_one', indicator='_result_match'
             )
+            if archived_prediction_card and '_result_win_odds' in df_backtest.columns:
+                saved_win = pd.to_numeric(df_backtest['獨贏賠率'], errors='coerce')
+                final_win = pd.to_numeric(df_backtest['_result_win_odds'], errors='coerce')
+                comparable_odds = saved_win.gt(1.0) & final_win.gt(1.0)
+                if int(comparable_odds.sum()) >= 20:
+                    backtest_final_odds_match_rate = float(
+                        np.isclose(saved_win[comparable_odds], final_win[comparable_odds], rtol=0.0, atol=0.01).mean()
+                    )
+                    if backtest_final_odds_match_rate >= 0.95:
+                        st.sidebar.error(
+                            f'⚠️ 存檔WIN價有 {backtest_final_odds_match_rate:.0%} 與完賽CSV官方終盤價相同；本模型含賠率特徵，以下命中率屬事後診斷，不能視為賽前實戰準確率。'
+                        )
             df_backtest['名次'] = df_backtest['_result_rank']
             df_backtest['numeric_rank'] = pd.to_numeric(df_backtest['名次'], errors='coerce').fillna(99)
             if '_result_win_odds' in df_backtest.columns:
@@ -1266,6 +1298,20 @@ if backtest_file is not None:
             backtest_ready = matched > 0
             if backtest_ready:
                 df_backtest = df_backtest[df_backtest['_result_rank'].notna()].copy()
+                result_rank_text = df_backtest['_result_rank'].astype(str).str.strip()
+                nonstarter = result_rank_text.str.match(r'(?i)^(WV|SCR|WD|WITHDRAWN|退出|取消|未出賽)$', na=False)
+                active_result_rows = df_backtest.loc[~nonstarter].copy()
+                score_cols = ['pred_win_prob', 'pred_place_prob']
+                available_score_cols = [c for c in score_cols if c in active_result_rows.columns]
+                if available_score_cols:
+                    incomplete_mask = active_result_rows[available_score_cols].isna().any(axis=1)
+                    incomplete_races = set(active_result_rows.loc[incomplete_mask, '賽事編號'].astype(str))
+                    backtest_incomplete_excluded_races = len(incomplete_races)
+                    if incomplete_races:
+                        df_backtest = df_backtest[~df_backtest['賽事編號'].astype(str).isin(incomplete_races)].copy()
+                        st.sidebar.warning(
+                            f'已排除 {backtest_incomplete_excluded_races} 場不完整回測：完賽資料顯示有正式參賽馬，但該馬沒有有效模型分數。'
+                        )
                 selected_meta = []
                 if win_mode == 'ranker_fixed': selected_meta.append(meta_win_fixed)
                 if win_mode == 'ranker_dynamic': selected_meta.append(meta_win_dynamic)
@@ -1290,7 +1336,7 @@ if backtest_file is not None:
                             f'{model_cutoff:%Y-%m-%d}，同日或更早賽事不能用此最終模型回測。'
                         )
                     backtest_ready = not df_backtest.empty
-                st.sidebar.success(f"✅ {result_source_label}已配對：{matched} 匹")
+                st.sidebar.success(f"✅ {result_source_label}已配對：{matched} 匹；完整可回測賽事 {df_backtest['賽事編號'].nunique() if backtest_ready else 0} 場")
             else:
                 st.sidebar.warning("未能按賽事編號＋馬號配對到名次。")
     except Exception as exc:
@@ -1388,23 +1434,25 @@ with tab1:
 
     # 控制列 1：自動更新與基準鎖定
     auto_col, interval_col, button_col, lock_col = st.columns([1.3, 1.3, 2.0, 2.0])
-    auto_refresh = auto_col.checkbox("自動更新目前場次", value=False)
+    auto_refresh = auto_col.checkbox("自動更新目前場次", value=False, disabled=archived_prediction_card)
     refresh_seconds = interval_col.selectbox(
         "更新間隔（秒）", [10, 30, 60, 120, 300], index=1, disabled=not auto_refresh
     )
-    manual_refresh = button_col.button("🔄 立即更新目前場次賠率", use_container_width=True)
-    lock_baseline = lock_col.button("📌 鎖定當前賠率為早盤基準", use_container_width=True, help="在開跑前 15~20 分鐘按一下鎖定早盤賠率，之後更新賠率時即可自動計算落飛幅度！")
+    manual_refresh = button_col.button("🔄 立即更新目前場次賠率", use_container_width=True, disabled=archived_prediction_card)
+    lock_baseline = lock_col.button("📌 鎖定當前賠率為早盤基準", use_container_width=True, disabled=archived_prediction_card, help="在開跑前 15~20 分鐘按一下鎖定早盤賠率，之後更新賠率時即可自動計算落飛幅度！")
+    if archived_prediction_card:
+        st.info("🗂️ 歷史回測模式：目前顯示該預測 CSV 存檔的賽前價格，不會向 HKJC 刷新或把存檔價標成即時盤口。")
 
     # 控制列 2：單場買時盤口凍結器
     f_col1, f_col2, f_col3 = st.columns([2.2, 1.8, 2.6])
     is_target_frozen = int(target_race) in st.session_state['frozen_races']
     if not is_target_frozen:
-        if f_col1.button(f"🔒 凍結第 {target_race} 場【買時賠率】 (下注後點擊)", use_container_width=True, type="primary"):
+        if f_col1.button(f"🔒 凍結第 {target_race} 場【買時賠率】 (下注後點擊)", use_container_width=True, type="primary", disabled=archived_prediction_card):
             st.session_state['frozen_races'][int(target_race)] = datetime.now(hk_timezone).strftime("%H:%M:%S")
             st.rerun()
     else:
         frozen_t = st.session_state['frozen_races'][int(target_race)]
-        if f_col1.button(f"🔓 解除第 {target_race} 場凍結 (已鎖於 {frozen_t})", use_container_width=True):
+        if f_col1.button(f"🔓 解除第 {target_race} 場凍結 (已鎖於 {frozen_t})", use_container_width=True, disabled=archived_prediction_card):
             st.session_state['frozen_races'].pop(int(target_race), None)
             st.rerun()
 
@@ -1426,7 +1474,7 @@ with tab1:
         st.session_state['baseline_locked_time'] = datetime.now(hk_timezone).strftime("%H:%M:%S")
         st.rerun()
 
-    if auto_refresh:
+    if auto_refresh and not archived_prediction_card:
         st_autorefresh(interval=int(refresh_seconds * 1000), key="hkjc_live_odds_autorefresh")
 
     if (auto_refresh or manual_refresh) and is_target_frozen:
@@ -1672,6 +1720,11 @@ with tab1:
 with tab2:
     st.subheader("📊 雙引擎多彩種策略回測總覽（命中率與官方派彩）")
     st.caption(f"目前回測套用之排序邏輯：`{strategy_mode}` ｜ 算分引擎：`{form_mode_str}` ｜ 模型：`{engine_str}`；測試採賽日前History")
+    if archived_prediction_card:
+        if pd.notna(backtest_final_odds_match_rate) and backtest_final_odds_match_rate >= 0.95:
+            st.error(f"事後資訊警告：本次存檔WIN價與官方終盤價有 {backtest_final_odds_match_rate:.0%} 一致；由於模型輸入包括WIN賠率、市場勝率與賠率排名，這次命中率不能當作賽前預測表現。")
+        else:
+            st.warning("歷史回測使用所選 prediction CSV 內存檔的WIN／PLACE價格；如檔案沒有報價時間戳，不能確認價格在開跑前何時取得，也不能重播原App某一分鐘的即時畫面。精確重播需用開跑前保存的完整賽卡／模型分數快照。")
     if df_backtest.empty or not backtest_ready:
         if backtest_cutoff_excluded_races:
             st.warning("已排除的賽事均不晚於候選模型訓練截止日，不能作為該最終模型的無洩漏回測。請使用截止日之後的賽事結果。")
