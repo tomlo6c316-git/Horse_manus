@@ -27,11 +27,8 @@ st.set_page_config(
 st.title("🐎 HKJC 15大特徵 AI 賽馬預測系統（WIN／PLACE／QP排序引擎）")
 st.markdown("---")
 
-# 初始化模擬投注紀錄與單場凍結名單
-if 'simulated_bets' not in st.session_state:
-    st.session_state['simulated_bets'] = pd.DataFrame(columns=[
-        '下注時間', '賽事編號', '場次', '馬號', '馬名', '玩法', '買入賠率', '注碼'
-    ])
+# 初始化單場凍結名單
+st.session_state.pop('simulated_bets', None)
 if 'frozen_races' not in st.session_state:
     st.session_state['frozen_races'] = {}  # 格式: {race_no: "HH:MM:SS"}
 
@@ -1654,68 +1651,6 @@ with tab1:
         })
         st.dataframe(display_detail, use_container_width=True, hide_index=True)
 
-    st.markdown("---")
-    st.subheader("🛒 虛擬模擬投注站 (Paper Trading)")
-    st.caption("開跑前 2~3 分鐘看準上方推薦後，在此鎖定當下買入賠率（下注同時會自動🔒凍結該場盤口）。")
-
-    col_s1, col_s2, col_s3, col_s4, col_s5 = st.columns([1, 2, 1.5, 1.5, 1.5])
-    
-    sim_race = col_s1.selectbox("場次", races_available if races_available else [1], key="sim_race")
-    
-    horses_in_race = df[df['賽事編號'].map(extract_race_no) == sim_race].copy()
-    horses_in_race['display_name'] = horses_in_race['馬號'].astype(object).map(str) + " (" + horses_in_race['馬名'].astype(object).map(str) + ")"
-    sim_horse = col_s2.selectbox("選擇馬匹", horses_in_race['display_name'].tolist() if not horses_in_race.empty else ["無資料"], key="sim_horse")
-    
-    sim_type = col_s3.selectbox("玩法", ["獨贏 (WIN)", "位置 (PLACE)"], key="sim_type")
-    sim_amount = col_s4.number_input("注碼", min_value=10, value=100, step=10, key="sim_amount")
-    
-    if col_s5.button("➕ 確定下注並凍結該場", use_container_width=True, type="primary") and not horses_in_race.empty:
-        horse_no_raw = sim_horse.split(" ")[0]
-        horse_name_raw = sim_horse.split("(")[1].replace(")", "")
-        
-        target_row = horses_in_race[horses_in_race['馬號'].astype(str) == horse_no_raw]
-        if "WIN" in sim_type:
-            current_odds = target_row['獨贏賠率'].values[0]
-            bet_type = "WIN"
-        else:
-            current_odds = target_row['位置賠率'].values[0]
-            bet_type = "PLA"
-            
-        now_str = datetime.now(hk_timezone).strftime("%H:%M:%S")
-        new_bet = pd.DataFrame([{
-            '下注時間': now_str,
-            '賽事編號': target_row['賽事編號'].values[0],
-            '場次': sim_race,
-            '馬號': horse_no_raw,
-            '馬名': horse_name_raw,
-            '玩法': bet_type,
-            '買入賠率': current_odds,
-            '注碼': sim_amount
-        }])
-        
-        st.session_state['simulated_bets'] = pd.concat([st.session_state['simulated_bets'], new_bet], ignore_index=True)
-        st.session_state['frozen_races'][int(sim_race)] = now_str
-        st.success(f"✅ 成功記錄注單並自動凍結第 {sim_race} 場買時盤口：{horse_no_raw} 號 ({bet_type}) @ 賠率 {current_odds}")
-
-    if not st.session_state['simulated_bets'].empty:
-        st.markdown("##### 🧾 目前模擬注單紀錄")
-        st.dataframe(st.session_state['simulated_bets'], use_container_width=True, hide_index=True)
-        
-        dl_col, clear_col = st.columns([2, 2])
-        csv_sim = st.session_state['simulated_bets'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        dl_col.download_button(
-            label="⬇ 下載模擬注單 (CSV)",
-            data=csv_sim,
-            file_name=f"simulated_bets_{api_date}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-        if clear_col.button("🗑 清除所有模擬紀錄", use_container_width=True):
-            st.session_state['simulated_bets'] = pd.DataFrame(columns=[
-                '下注時間', '賽事編號', '場次', '馬號', '馬名', '玩法', '買入賠率', '注碼'
-            ])
-            st.rerun()
-
 # ---------------- 分頁 2: 賽後回測 ----------------
 with tab2:
     st.subheader("📊 雙引擎多彩種策略回測總覽（命中率與官方派彩）")
@@ -1733,8 +1668,8 @@ with tab2:
     else:
         st.info("為避免用同一批賽果挑參數造成過度擬合，本頁不再提供單日ROI尋優。請以較早賽期定參數，再用未參與調整的後續賽期驗證。")
 
-        sub_tab1, sub_tab2, sub_tab3, sub_tab4, sub_tab5 = st.tabs([
-            "🥇 獨贏 (Win Engine)", "🥈 單匹位置 (Place Engine)", "🔗 位置Q (Place Engine)", "🥉 3匹位置包抄 (Place Engine)", "🛒 模擬結算 (Paper Trade)"
+        sub_tab1, sub_tab2, sub_tab3, sub_tab4 = st.tabs([
+            "🥇 獨贏 (Win Engine)", "🥈 單匹位置 (Place Engine)", "🔗 位置Q (Place Engine)", "🥉 3匹位置包抄 (Place Engine)"
         ])
 
         with sub_tab1:
@@ -1955,98 +1890,3 @@ with tab2:
                 st.dataframe(pd.DataFrame(p3_records), use_container_width=True, hide_index=True)
             else:
                 st.info("💡 目前設定下沒有符合出手的場次。")
-
-        with sub_tab5:
-            st.markdown("#### 🛒 模擬投注真實結算 (Paper Trading PnL)")
-            st.caption("系統會將虛擬注單與官方賽果比對；只有結果檔含官方每$10派彩時才結算收益/ROI，缺派彩只報命中率，不以買入賠率替代派彩。")
-            
-            if 'simulated_bets' not in st.session_state or st.session_state['simulated_bets'].empty:
-                st.info("💡 目前沒有任何模擬投注紀錄。請先在「賽前預測」分頁進行模擬下注。")
-            else:
-                sim_df = st.session_state['simulated_bets'].copy()
-                sim_results = []
-                sim_invested, sim_return, sim_hits = 0, 0, 0
-                sim_settled_bets, sim_missing_dividend = 0, False
-                sim_bets = len(sim_df)
-
-                for idx, bet in sim_df.iterrows():
-                    race_id = bet['賽事編號']
-                    horse_no = str(bet['馬號'])
-                    bet_type = bet['玩法']
-                    locked_odds = float(bet['買入賠率'])
-                    stake = float(bet['注碼'])
-
-                    sim_invested += stake
-
-                    match = df_backtest[(df_backtest['賽事編號'] == race_id) & (df_backtest['馬號'].astype(str) == horse_no)]
-
-                    if match.empty or pd.isna(match['numeric_rank'].values[0]) or match['numeric_rank'].values[0] == 99:
-                        sim_results.append({
-                            '下注時間': bet['下注時間'],
-                            '場次': bet['場次'],
-                            '馬匹': f"{horse_no} ({bet['馬名']})",
-                            '玩法': bet_type,
-                            '注碼': f"${stake:.0f}",
-                            '買入時賠率': locked_odds,
-                            '實際名次': '-',
-                            '結果': '⏳ 待開彩',
-                            '派彩': '$0.0',
-                            '淨盈虧': '$0.0'
-                        })
-                    else:
-                        sim_settled_bets += 1
-                        actual_rank = match['numeric_rank'].values[0]
-                        rank_str = str(match['名次'].values[0]).replace('.0', '')
-
-                        is_hit = False
-                        if bet_type == "WIN" and actual_rank == 1:
-                            is_hit = True
-                            official_dividend = match.get('回測獨贏派彩', pd.Series([np.nan])).values[0]
-                        elif bet_type == "PLA":
-                            race_group = df_backtest[df_backtest['賽事編號'] == race_id]
-                            slots = place_slots_for_race(race_group)
-                            is_hit = slots > 0 and 1 <= actual_rank <= slots
-                            official_dividend = match.get('回測位置派彩', pd.Series([np.nan])).values[0] if is_hit else 0.0
-                        else:
-                            official_dividend = 0.0
-
-                        if is_hit:
-                            sim_hits += 1
-                            if pd.notna(official_dividend) and float(official_dividend) > 0:
-                                payout = stake * float(official_dividend) / 10.0
-                                sim_return += payout
-                            else:
-                                payout = np.nan
-                                sim_missing_dividend = True
-                            result_text = "✅ 贏"
-                        else:
-                            payout = 0
-                            result_text = "❌ 輸/未入位"
-
-                        sim_results.append({
-                            '下注時間': bet['下注時間'],
-                            '場次': bet['場次'],
-                            '馬匹': f"{horse_no} ({bet['馬名']})",
-                            '玩法': bet_type,
-                            '注碼': f"${stake:.0f}",
-                            '買入時賠率': locked_odds,
-                            '官方派彩（每$10）': round(float(official_dividend), 2) if pd.notna(official_dividend) and float(official_dividend) > 0 else '未提供' if is_hit else '-',
-                            '實際名次': f"第 {rank_str} 名",
-                            '結果': result_text,
-                            '派彩': f"${payout:.1f}" if pd.notna(payout) else '不計（缺官方派彩）',
-                            '淨盈虧': f"${payout - stake:.1f}" if pd.notna(payout) else '不計（缺官方派彩）'
-                        })
-
-                if sim_invested > 0:
-                    col1, col2, col3, col4 = st.columns(4)
-                    col1.metric("模擬總注數", f"{sim_bets} 注")
-                    col2.metric("命中注數", f"{sim_hits} 注", f"命中率: {sim_hits/sim_bets*100:.1f}%")
-                    col3.metric("總投入資金", f"${sim_invested:,.1f}")
-                    if sim_settled_bets == sim_bets and not sim_missing_dividend:
-                        roi = ((sim_return - sim_invested) / sim_invested) * 100
-                        col4.metric("官方派彩ROI", f"{roi:.2f}%", f"官方回收 ${sim_return:,.1f}")
-                    else:
-                        col4.metric("ROI", "未計算", "待完賽或缺官方派彩")
-
-                    st.markdown("##### 🧾 模擬投注詳細結算單")
-                    st.dataframe(pd.DataFrame(sim_results), use_container_width=True, hide_index=True)
