@@ -578,14 +578,13 @@ win_mode = win_labels.get(win_model_choice, 'legacy_fixed')
 win_dynamic_form = win_mode == 'ranker_dynamic'
 
 place_labels = {}
-if model_place_dynamic is not None: place_labels['現有PLACE模型（Dynamic）'] = 'legacy_place_dynamic'
+if model_place is not None: place_labels['舊PLACE模型（Dynamic）'] = 'legacy_place_dynamic'
 if model_place_fixed is not None: place_labels['新PLACE模型（Fixed）'] = 'place_fixed'
 if model_place_dynamic is not None: place_labels['新PLACE模型（Dynamic）'] = 'place_dynamic'
-if model_place is not None: place_labels['GitHub PLACE模型（Dynamic）'] = 'github_place_dynamic'
 place_default = next((i for i,k in enumerate(place_labels) if k == 'place_fixed'), 0)
 place_model_choice = st.sidebar.selectbox('3️⃣ PLACE引擎（入位排序）', list(place_labels) or ['無可用PLACE模型'], index=place_default,
-    help='PLACE模型獨立選Form；此選擇會影響位置候選及以PLACE馬匹組合構成的QP。')
-place_mode = place_labels.get(place_model_choice, 'github_place_dynamic')
+    help='選擇舊版Dynamic或新版Fixed/Dynamic PLACE模型；此選擇會影響位置候選及以PLACE馬匹組合構成的QP。')
+place_mode = place_labels.get(place_model_choice, 'legacy_place_dynamic')
 place_dynamic_form = place_mode.endswith('dynamic')
 
 qp_labels = {'以單馬PLACE排序組成QP': 'place_top2'}
@@ -1485,7 +1484,6 @@ if len(valid_idx):
         'legacy_place_dynamic': model_place,
         'place_fixed': model_place_fixed,
         'place_dynamic': model_place_dynamic,
-        'github_place_dynamic': model_place,
     }.get(place_mode)
     if place_model_choice_obj is None:
         place_model_choice_obj = model_win
