@@ -1001,11 +1001,18 @@ if len(df_raw) and '賽事編號' in df_raw.columns:
         df_raw['賽事編號'].astype(str).str.extract(r'(20\d{6})', expand=False),
         format='%Y%m%d', errors='coerce'
     )
-archived_prediction_card = bool(
+dated_archived_prediction_card = bool(
     len(df_raw) > 0 and race_date_values.notna().all()
     and race_date_values.nunique() == 1
     and race_date_values.iloc[0].date() < datetime.now(hk_timezone).date()
 )
+explicit_odds_snapshot = bool(
+    (selected_prediction_source == 'github' and selected_remote_prediction is not None
+     and 'bet_odds_updated' in selected_remote_prediction.get('path', '').lower())
+    or (SELECTED_CSV_PATH is not None and SELECTED_CSV_PATH.is_file()
+        and 'bet_odds_updated' in SELECTED_CSV_PATH.stem.lower())
+)
+archived_prediction_card = dated_archived_prediction_card or explicit_odds_snapshot
 remote_has_saved_prices = bool(
     selected_prediction_source == 'github' and selected_remote_prediction is not None
     and any(
@@ -1014,10 +1021,8 @@ remote_has_saved_prices = bool(
     )
 )
 saved_odds_snapshot = bool(
-    fetched_prediction_df is None and archived_prediction_card and (
-        remote_has_saved_prices
-        or (SELECTED_CSV_PATH is not None and SELECTED_CSV_PATH.is_file()
-            and 'bet_odds_updated' in SELECTED_CSV_PATH.stem.lower())
+    fetched_prediction_df is None and (
+        explicit_odds_snapshot or (dated_archived_prediction_card and remote_has_saved_prices)
     )
 )
 if fetched_prediction_df is None and not archived_prediction_card:
