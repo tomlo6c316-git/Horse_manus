@@ -1182,15 +1182,31 @@ if '跑法' not in st.session_state['df_data'].columns:
 st.info("👇 以下是當前載入的賽事資料。你可以點擊表格修改「跑法」與「賠率」，或透過下方的更新面板抓取即時賠率與凍結單場盤口。")
 
 def estimate_place_odds_for_display(frame):
-    """Estimate a display-only PLACE quote; never substitute it for official odds."""
+    """Estimate a non-official PLACE quote from WIN odds when no valid PLACE quote exists."""
     win = pd.to_numeric(frame.get('獨贏賠率', pd.Series(index=frame.index,dtype=float)), errors='coerce')
     official_place = pd.to_numeric(frame.get('位置賠率', pd.Series(index=frame.index,dtype=float)), errors='coerce')
     estimate = 1.0 + (win - 1.0) / 3.2
-    return estimate.where(win.gt(1.0) & ~official_place.gt(1.0)).round(2)
+    return estimate.where(win.gt(1.0) & ~official_place.gt(1.0))
+
+def place_odds_used_for_prediction(frame):
+    """Use official PLACE odds when valid; otherwise use the formula estimate."""
+    official_place = pd.to_numeric(frame.get('位置賠率', pd.Series(index=frame.index,dtype=float)), errors='coerce')
+    estimated_place = estimate_place_odds_for_display(frame)
+    return official_place.where(official_place.gt(1.0), estimated_place)
+
+def place_odds_source(frame):
+    official_place = pd.to_numeric(frame.get('位置賠率', pd.Series(index=frame.index,dtype=float)), errors='coerce')
+    estimated_place = estimate_place_odds_for_display(frame)
+    return pd.Series(np.select(
+        [official_place.gt(1.0), estimated_place.notna()],
+        ['HKJC官方', '公式估算'], default='未有可用價'
+    ), index=frame.index)
 
 st.session_state['df_data']['位置賠率估算（非官方）'] = estimate_place_odds_for_display(st.session_state['df_data'])
+st.session_state['df_data']['位置賠率（預測／EV用）'] = place_odds_used_for_prediction(st.session_state['df_data'])
+st.session_state['df_data']['位置賠率來源'] = place_odds_source(st.session_state['df_data'])
 
-edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '跑法', '賽道', '獨贏賠率', '位置賠率', '位置賠率估算（非官方）']
+edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '跑法', '賽道', '獨贏賠率', '位置賠率', '位置賠率估算（非官方）', '位置賠率（預測／EV用）', '位置賠率來源']
 for c in edit_columns:
     if c not in st.session_state['df_data'].columns:
         st.session_state['df_data'][c] = ''
@@ -1199,7 +1215,7 @@ df_editable = st.session_state['df_data'][edit_columns].copy()
 editor_key = f"odds_editor_{selected_csv_name}_{st.session_state.get('odds_editor_version', 0)}"
 edited_df = st.data_editor(
     df_editable,
-    disabled=['賽事編號', '馬號', '馬名', '排位檔位', '賽道', '位置賠率估算（非官方）'],
+    disabled=['賽事編號', '馬號', '馬名', '排位檔位', '賽道', '位置賠率估算（非官方）', '位置賠率（預測／EV用）', '位置賠率來源'],
     column_config={
         "跑法": st.column_config.SelectboxColumn("跑法", options=["放頭", "跟前", "居中", "後上"], required=True)
     },
@@ -1213,15 +1229,17 @@ st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠
 st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce')
 st.session_state['df_data']['跑法'] = edited_df['跑法']
 st.session_state['df_data']['位置賠率估算（非官方）'] = estimate_place_odds_for_display(st.session_state['df_data'])
+st.session_state['df_data']['位置賠率（預測／EV用）'] = place_odds_used_for_prediction(st.session_state['df_data'])
+st.session_state['df_data']['位置賠率來源'] = place_odds_source(st.session_state['df_data'])
 
 df = st.session_state['df_data'].copy()
-st.caption('估算位置賠率只供缺價時閱讀參考；不會代入AI特徵、EV、投注篩選或ROI。正式計算仍只採用官方位置賠率。公式：1 + (獨贏賠率 − 1) ÷ 3.2。')
+st.caption('沒有有效HKJC位置賠率時，PLACE EV及位置候選篩選會直接使用公式估算價：1 + (獨贏賠率 − 1) ÷ 3.2；位置AI入位率本身不會因PLACE賠率改變。此估算不是官方報價／派彩，不可用來聲稱真實ROI；結算只採官方派彩。')
 
 # 側邊欄提供隨時下載「包含目前已凍結買時賠率與跑法」的完整賽卡快照
 sample_id_for_dl = str(df['賽事編號'].iloc[0]).strip() if len(df) else ""
 dl_date_match = re.search(r"(20\d{6})", sample_id_for_dl)
 dl_date_tag = dl_date_match.group(1) if dl_date_match else datetime.now(hk_timezone).strftime("%Y%m%d")
-snapshot_export_df = df.drop(columns=['位置賠率估算（非官方）'], errors='ignore')
+snapshot_export_df = df.drop(columns=['位置賠率估算（非官方）', '位置賠率（預測／EV用）', '位置賠率來源'], errors='ignore')
 snapshot_csv_bytes = snapshot_export_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
 snapshot_download_name = (f'postrace_diagnostic_{dl_date_tag}.csv' if final_odds_diagnostic_active else f'prediction_{dl_date_tag}.csv')
 snapshot_download_label = ('⚠️ 下載事後診斷資料（非賽前預測）' if final_odds_diagnostic_active else f'📸 下載【買時賠率】快照 (prediction_{dl_date_tag}.csv)')
@@ -1529,7 +1547,7 @@ if len(valid_idx):
 
 # No estimated PLACE price: EV/stake stays blank unless the official HKJC quote exists.
 df['win_ev'] = df['pred_win_prob'] * pd.to_numeric(df['獨贏賠率'],errors='coerce')
-df['place_ev'] = df['pred_place_prob'] * pd.to_numeric(df['位置賠率'],errors='coerce')
+df['place_ev'] = df['pred_place_prob'] * pd.to_numeric(df['位置賠率（預測／EV用）'],errors='coerce')
 df['ev'] = df['win_ev']
 
 # 6. 計算雙引擎「抗噪穩定綜合分數」 (僅結合臨場落飛資金)
@@ -1563,7 +1581,7 @@ def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val, b
         else:
             # 位置賠率較低，將獨贏最低賠率門檻除以 3 作為位置賠率下限
             min_pla_odds = max(1.01, min_odds_val / 3.0)
-            cond = (group['place_ev'] >= min_ev_val) & (group['位置賠率'] >= min_pla_odds)
+            cond = (group['place_ev'] >= min_ev_val) & (group['位置賠率（預測／EV用）'] >= min_pla_odds)
         if mode.startswith("🛡️"):
             cond = cond & (group['odds_drop_pct'] > -25.0)
             sort_col = 'smart_score_place'
@@ -1967,10 +1985,10 @@ with tab1:
             
         if len(sorted_place) >= 1:
             p1 = sorted_place.iloc[0]
-            q_pick = f"單膽位置: {p1['馬號']} ({p1['馬名']}) [位EV:{p1['place_ev']:.2f}] 固定注碼:${FIXED_STAKE_HKD:.0f}"
+            q_pick = f"單膽位置: {p1['馬號']} ({p1['馬名']}) [AI入位率:{p1['pred_place_prob']*100:.1f}% | 位置價:{p1['位置賠率（預測／EV用）']:.2f}({p1['位置賠率來源']}) | 位EV:{p1['place_ev']:.2f}] 固定注碼:${FIXED_STAKE_HKD:.0f}"
         elif not qp_candidates.empty:
             p1 = qp_candidates.iloc[0]
-            q_pick = f"單膽位置候選: {p1['馬號']} ({p1['馬名']}) [AI入位率:{p1['pred_place_prob']*100:.0f}%；未有官方位置價，不計EV]"
+            q_pick = f"單膽位置候選: {p1['馬號']} ({p1['馬名']}) [AI入位率:{p1['pred_place_prob']*100:.0f}%；目前設定下未通過位置EV／價格門檻]"
         else:
             q_pick = "⚠️ 位置模型未有有效分數"
 
@@ -2043,6 +2061,8 @@ with tab1:
             '最新獨贏': race_detail_df['獨贏賠率'].round(1),
             '位置賠率': race_detail_df['位置賠率'].round(1),
             '位置賠率估算（非官方）': race_detail_df['位置賠率估算（非官方）'].round(2),
+            '位置賠率（預測／EV用）': race_detail_df['位置賠率（預測／EV用）'].round(2),
+            '位置賠率來源': race_detail_df['位置賠率來源'],
             '資金流向': race_detail_df['資金流向'],
             '獨贏 EV': race_detail_df['win_ev'].round(2),
             '位置 EV': race_detail_df['place_ev'].round(2),
@@ -2172,6 +2192,8 @@ with tab2:
                         '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         'AI入位率': f"{pick['pred_place_prob']*100:.1f}%",
+                        '位置價（選馬用）': round(pick['位置賠率（預測／EV用）'], 2) if pd.notna(pick['位置賠率（預測／EV用）']) else '未有可用價',
+                        '位置價來源': pick['位置賠率來源'],
                         '買時 位置EV': round(pick['place_ev'], 2),
                         '官方位置派彩（每$10）': round(p_dividend, 2) if pd.notna(p_dividend) else '未提供',
                         '固定注碼（每注$10）': f"${stake:.0f}",
@@ -2188,7 +2210,7 @@ with tab2:
                     col3.metric("官方派彩ROI", f"{place_roi:.2f}%", f"官方回收 ${place_return:,.1f}")
                 else:
                     col3.metric("ROI", "未計算", "中獎注缺官方位置派彩")
-                st.caption("位置報價不等於官方派彩；沒有官方派彩欄時只報命中率。")
+                st.caption("位置報價不等於官方派彩；若選馬用的是公式估算價，命中率仍可核對，但回測不代表真實買時價格。只有官方派彩可計算派彩ROI。")
                 st.markdown("##### 📝 位置明細")
                 st.dataframe(pd.DataFrame(place_records), use_container_width=True, hide_index=True)
             else:
@@ -2291,6 +2313,8 @@ with tab2:
                         '上仗名次': "新馬/無" if pick['real_last_rank'] == 6.5 else f"第 {int(pick['real_last_rank'])} 名",
                         '實際名次': str(pick['名次']).replace('.0', ''),
                         'AI入位率': f"{pick['pred_place_prob']*100:.1f}%",
+                        '位置價（選馬用）': round(pick['位置賠率（預測／EV用）'], 2) if pd.notna(pick['位置賠率（預測／EV用）']) else '未有可用價',
+                        '位置價來源': pick['位置賠率來源'],
                         '官方位置派彩（每$10）': round(p_dividend, 2) if pd.notna(p_dividend) else '未提供',
                         '買時 位置EV': round(pick['place_ev'], 2),
                         '固定注碼（每注$10）': f"${stake:.0f}",
