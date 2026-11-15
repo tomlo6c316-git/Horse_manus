@@ -539,6 +539,7 @@ if pending_result_label in result_source_options:
 selected_result_source = st.sidebar.selectbox('回測賽果來源', result_source_options, key='result_source_selector')
 backtest_file = None
 backtest_file_source_label = None
+backtest_result_raw_for_diagnostic = None
 if selected_result_source == '本次手動上傳' and backtest_upload is not None:
     backtest_file = backtest_upload
     backtest_file_source_label = '手動上傳賽果'
@@ -549,6 +550,11 @@ elif selected_result_source in github_result_choices:
         backtest_file_source_label = f"GitHub賽果：{remote_result_info['name']}"
     except Exception as exc:
         st.sidebar.error(f'讀取GitHub賽果失敗：{type(exc).__name__}: {exc}')
+if backtest_file is not None:
+    try:
+        backtest_result_raw_for_diagnostic = read_csv_bytes(backtest_file.getvalue())
+    except Exception:
+        backtest_result_raw_for_diagnostic = None
 
 # ==========================================
 # ⚙️ 策略、資金與算分引擎設定
@@ -877,6 +883,33 @@ def normalize_race_id(value):
         return f"{match.group(1)}-{int(match.group(2)):02d}"
     return text
 
+def fill_missing_win_odds_from_results(card, results):
+    """Fill only missing historical WIN prices from exact race/horse result keys."""
+    if not {'賽事編號','馬號','獨贏賠率'}.issubset(results.columns):
+        return card.copy(), 0
+    output = card.copy()
+    if '獨贏賠率' not in output.columns:
+        output['獨贏賠率'] = np.nan
+    result_keys = results[['賽事編號','馬號','獨贏賠率']].copy()
+    result_keys['_race_key'] = result_keys['賽事編號'].map(normalize_race_id)
+    result_keys['_horse_key'] = result_keys['馬號'].map(normalize_horse_no)
+    result_keys['_final_win'] = pd.to_numeric(result_keys['獨贏賠率'], errors='coerce')
+    result_keys = result_keys.dropna(subset=['_final_win']).drop_duplicates(['_race_key','_horse_key'],keep='last')
+    result_odds_map = {
+        (row['_race_key'],row['_horse_key']):float(row['_final_win'])
+        for _,row in result_keys.iterrows() if row['_final_win'] > 1.0
+    }
+    filled = 0
+    for idx, runner in output.iterrows():
+        current_odds = pd.to_numeric(pd.Series([runner.get('獨贏賠率')]),errors='coerce').iloc[0]
+        if pd.isna(current_odds) or current_odds <= 1.0:
+            result_key = (normalize_race_id(runner.get('賽事編號')),normalize_horse_no(runner.get('馬號')))
+            final_odds = result_odds_map.get(result_key)
+            if final_odds is not None:
+                output.at[idx,'獨贏賠率'] = final_odds
+                filled += 1
+    return output, filled
+
 def fetch_live_odds(date_str, venue, race_no=None):
     body = {
         "operationName": "racing",
@@ -1033,6 +1066,32 @@ elif saved_odds_snapshot:
 elif archived_prediction_card:
     st.sidebar.warning('已載入過去賽日預測卡：保留檔案內賠率供歷史命中率回測；不視為目前即時官方報價。')
 
+final_odds_diagnostic_active = False
+postrace_win_odds_filled = 0
+result_diag = backtest_result_raw_for_diagnostic
+if archived_prediction_card and result_diag is not None and {'賽事編號','馬號','獨贏賠率'}.issubset(result_diag.columns):
+    result_diag_odds = pd.to_numeric(result_diag['獨贏賠率'], errors='coerce')
+    prediction_win_odds = pd.to_numeric(df_raw.get('獨贏賠率', pd.Series(index=df_raw.index,dtype=float)), errors='coerce')
+    if result_diag_odds.gt(1.0).any() and prediction_win_odds.le(1.0).fillna(True).any():
+        final_odds_diagnostic_active = st.sidebar.checkbox(
+            '只作事後診斷：以賽果檔官方終盤WIN價補算分數',
+            value=False,
+            key=f"postrace_odds_diag_{hashlib.sha1(str(selected_result_source).encode()).hexdigest()[:10]}",
+            help='此價是賽後終盤價，不是賽前買時快照。由於15項特徵包含WIN賠率，使用後會有事後資訊洩漏，只能檢查模型排序，不可當成有效賽前回測。',
+        )
+        if final_odds_diagnostic_active:
+            df_raw, postrace_win_odds_filled = fill_missing_win_odds_from_results(df_raw,result_diag)
+            if postrace_win_odds_filled:
+                prediction_signature = f'{prediction_signature}:postrace-win-odds-diagnostic'
+                st.error(
+                    f'事後診斷模式：已從賽果CSV帶入 {postrace_win_odds_filled} 匹馬的官方終盤WIN價重新計分。此結果含賽後資訊，不能視為賽前預測或有效ROI回測；沒有匹配賽果的第6場不會被猜價。'
+                )
+            else:
+                st.sidebar.warning('選取的賽果檔沒有可配對的官方終盤WIN價，未能補算。')
+
+if archived_prediction_card and not pd.to_numeric(df_raw.get('獨贏賠率',pd.Series(index=df_raw.index,dtype=float)),errors='coerce').gt(1.0).any():
+    st.sidebar.warning('這份歷史預測CSV沒有有效WIN賠率；PLACE賠率亦不會由WIN估算。若已選官方賽果CSV，可勾選上方「只作事後診斷」以終盤WIN價檢查排序；要做有效賽前回測，請載入原始賽前快照。')
+
 auto_odds_status = None
 if fetched_prediction_df is not None and not archived_prediction_card and st.session_state.pop('pending_auto_odds_fetch', False):
     odds_date = st.session_state.get('fetched_prediction_date', race_date_choice).strftime('%Y-%m-%d')
@@ -1153,15 +1212,19 @@ sample_id_for_dl = str(df['賽事編號'].iloc[0]).strip() if len(df) else ""
 dl_date_match = re.search(r"(20\d{6})", sample_id_for_dl)
 dl_date_tag = dl_date_match.group(1) if dl_date_match else datetime.now(hk_timezone).strftime("%Y%m%d")
 snapshot_csv_bytes = df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+snapshot_download_name = (f'postrace_diagnostic_{dl_date_tag}.csv' if final_odds_diagnostic_active else f'prediction_{dl_date_tag}.csv')
+snapshot_download_label = ('⚠️ 下載事後診斷資料（非賽前預測）' if final_odds_diagnostic_active else f'📸 下載【買時賠率】快照 (prediction_{dl_date_tag}.csv)')
 st.sidebar.download_button(
-    f'📸 下載【買時賠率】快照 (prediction_{dl_date_tag}.csv)',
+    snapshot_download_label,
     data=snapshot_csv_bytes,
-    file_name=f'prediction_{dl_date_tag}.csv',
+    file_name=snapshot_download_name,
     mime='text/csv',
     use_container_width=True,
     help='將目前畫面上的賠率與設定（包含你逐場凍結的買時賠率與跑法）完整打包下載，放到 GitHub 即可隨時重現 100% 真實買時回測！'
 )
-if GITHUB_CSV_ENABLED and st.sidebar.button(
+if final_odds_diagnostic_active:
+    st.sidebar.warning('事後診斷資料不可保存至正式 prediction 路徑，避免終盤賠率污染賽前快照。')
+elif GITHUB_CSV_ENABLED and st.sidebar.button(
     f'☁️ 保存／覆蓋到GitHub（{dl_date_tag}）', use_container_width=True, key='save_current_prediction_snapshot_github'
 ):
     try:
@@ -1509,6 +1572,9 @@ df_backtest = df.copy()
 backtest_ready = False
 backtest_cutoff_excluded_races = 0
 backtest_incomplete_excluded_races = 0
+backtest_matched_runner_count = 0
+backtest_matched_race_count = 0
+backtest_result_missing_races = []
 backtest_final_odds_match_rate = np.nan
 if backtest_file is not None:
     try:
@@ -1544,6 +1610,9 @@ if backtest_file is not None:
 
             df_backtest['_race_key'] = df_backtest['賽事編號'].map(normalize_race_id)
             df_backtest['_horse_key'] = df_backtest['馬號'].map(normalize_horse_no)
+            prediction_race_keys = set(df_backtest['_race_key'].dropna())
+            result_race_keys = set(result_map['_race_key'].dropna())
+            backtest_result_missing_races = sorted(prediction_race_keys - result_race_keys)
             df_backtest = df_backtest.merge(
                 result_map, on=['_race_key', '_horse_key'], how='left', validate='many_to_one', indicator='_result_match'
             )
@@ -1569,11 +1638,16 @@ if backtest_file is not None:
                 df_backtest['回測位置派彩'] = pd.to_numeric(df_backtest['_result_place_dividend'], errors='coerce')
             has_official_result = df_backtest['_result_match'].eq('both') & df_backtest['_result_rank'].notna()
             matched = int(has_official_result.sum())
+            backtest_matched_runner_count = matched
+            backtest_matched_race_count = int(df_backtest.loc[has_official_result,'賽事編號'].nunique())
+            if backtest_result_missing_races:
+                missing_labels = [f"第{extract_race_no(rid)}場" for rid in backtest_result_missing_races]
+                st.sidebar.warning(f"所選賽果CSV沒有這些賽卡場次：{'、'.join(missing_labels)}；這些場次不會結算。")
             backtest_ready = matched > 0
             if backtest_ready:
                 df_backtest = df_backtest[df_backtest['_result_rank'].notna()].copy()
                 result_rank_text = df_backtest['_result_rank'].astype(str).str.strip()
-                nonstarter = result_rank_text.str.match(r'(?i)^(WV|SCR|WD|WITHDRAWN|退出|取消|未出賽)$', na=False)
+                nonstarter = result_rank_text.str.match(r'(?i)^(?:WV|SCR|WD|WITHDRAWN)(?:[-/ ].*)?$|^(?:退出|退賽|取消|未出賽)', na=False)
                 active_result_rows = df_backtest.loc[~nonstarter].copy()
                 score_cols = ['pred_win_prob', 'pred_place_prob']
                 available_score_cols = [c for c in score_cols if c in active_result_rows.columns]
@@ -1979,8 +2053,15 @@ with tab2:
     if df_backtest.empty or not backtest_ready:
         if backtest_cutoff_excluded_races:
             st.warning("已排除的賽事均不晚於候選模型訓練截止日，不能作為該最終模型的無洩漏回測。請使用截止日之後的賽事結果。")
+        elif backtest_matched_runner_count and backtest_incomplete_excluded_races:
+            st.warning(
+                f'賽果已配對 {backtest_matched_runner_count} 匹、涉及 {backtest_matched_race_count} 場；但 {backtest_incomplete_excluded_races} 場缺少完整AI分數，已暫不計入。'
+                '請確認預測賽卡在賽前含有官方WIN賠率。11月14日檔案原本WIN／PLACE欄全空；可在左側啟用「只作事後診斷」以終盤WIN價重新計分，但不可當作無洩漏賽前回測。'
+            )
+        elif backtest_file is not None and backtest_matched_runner_count == 0:
+            st.warning('已載入賽果CSV，但賽事編號＋馬號沒有配對到預測卡；請確認下拉選取的是同一賽日的完整 prediction CSV 和 results CSV。')
         else:
-            st.warning("請在左側上傳已完賽的結果 CSV。需有『賽事編號』、『馬號』及『名次』。")
+            st.warning("請在左側選擇或上傳已完賽的結果 CSV。需有『賽事編號』、『馬號』及『名次』。")
     else:
         st.info("為避免用同一批賽果挑參數造成過度擬合，本頁不再提供單日ROI尋優。請以較早賽期定參數，再用未參與調整的後續賽期驗證。")
 
