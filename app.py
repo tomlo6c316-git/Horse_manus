@@ -1181,7 +1181,16 @@ if '跑法' not in st.session_state['df_data'].columns:
 # ==========================================
 st.info("👇 以下是當前載入的賽事資料。你可以點擊表格修改「跑法」與「賠率」，或透過下方的更新面板抓取即時賠率與凍結單場盤口。")
 
-edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '跑法', '賽道', '獨贏賠率', '位置賠率']
+def estimate_place_odds_for_display(frame):
+    """Estimate a display-only PLACE quote; never substitute it for official odds."""
+    win = pd.to_numeric(frame.get('獨贏賠率', pd.Series(index=frame.index,dtype=float)), errors='coerce')
+    official_place = pd.to_numeric(frame.get('位置賠率', pd.Series(index=frame.index,dtype=float)), errors='coerce')
+    estimate = 1.0 + (win - 1.0) / 3.2
+    return estimate.where(win.gt(1.0) & ~official_place.gt(1.0)).round(2)
+
+st.session_state['df_data']['位置賠率估算（非官方）'] = estimate_place_odds_for_display(st.session_state['df_data'])
+
+edit_columns = ['賽事編號', '馬號', '馬名', '排位檔位', '跑法', '賽道', '獨贏賠率', '位置賠率', '位置賠率估算（非官方）']
 for c in edit_columns:
     if c not in st.session_state['df_data'].columns:
         st.session_state['df_data'][c] = ''
@@ -1190,7 +1199,7 @@ df_editable = st.session_state['df_data'][edit_columns].copy()
 editor_key = f"odds_editor_{selected_csv_name}_{st.session_state.get('odds_editor_version', 0)}"
 edited_df = st.data_editor(
     df_editable,
-    disabled=['賽事編號', '馬號', '馬名', '排位檔位', '賽道'],
+    disabled=['賽事編號', '馬號', '馬名', '排位檔位', '賽道', '位置賠率估算（非官方）'],
     column_config={
         "跑法": st.column_config.SelectboxColumn("跑法", options=["放頭", "跟前", "居中", "後上"], required=True)
     },
@@ -1203,14 +1212,17 @@ edited_df = st.data_editor(
 st.session_state['df_data']['獨贏賠率'] = pd.to_numeric(edited_df['獨贏賠率'], errors='coerce')
 st.session_state['df_data']['位置賠率'] = pd.to_numeric(edited_df['位置賠率'], errors='coerce')
 st.session_state['df_data']['跑法'] = edited_df['跑法']
+st.session_state['df_data']['位置賠率估算（非官方）'] = estimate_place_odds_for_display(st.session_state['df_data'])
 
 df = st.session_state['df_data'].copy()
+st.caption('估算位置賠率只供缺價時閱讀參考；不會代入AI特徵、EV、投注篩選或ROI。正式計算仍只採用官方位置賠率。公式：1 + (獨贏賠率 − 1) ÷ 3.2。')
 
 # 側邊欄提供隨時下載「包含目前已凍結買時賠率與跑法」的完整賽卡快照
 sample_id_for_dl = str(df['賽事編號'].iloc[0]).strip() if len(df) else ""
 dl_date_match = re.search(r"(20\d{6})", sample_id_for_dl)
 dl_date_tag = dl_date_match.group(1) if dl_date_match else datetime.now(hk_timezone).strftime("%Y%m%d")
-snapshot_csv_bytes = df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+snapshot_export_df = df.drop(columns=['位置賠率估算（非官方）'], errors='ignore')
+snapshot_csv_bytes = snapshot_export_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
 snapshot_download_name = (f'postrace_diagnostic_{dl_date_tag}.csv' if final_odds_diagnostic_active else f'prediction_{dl_date_tag}.csv')
 snapshot_download_label = ('⚠️ 下載事後診斷資料（非賽前預測）' if final_odds_diagnostic_active else f'📸 下載【買時賠率】快照 (prediction_{dl_date_tag}.csv)')
 st.sidebar.download_button(
@@ -2030,6 +2042,7 @@ with tab1:
             '基準獨贏': race_detail_df['基準賠率'].round(1),
             '最新獨贏': race_detail_df['獨贏賠率'].round(1),
             '位置賠率': race_detail_df['位置賠率'].round(1),
+            '位置賠率估算（非官方）': race_detail_df['位置賠率估算（非官方）'].round(2),
             '資金流向': race_detail_df['資金流向'],
             '獨贏 EV': race_detail_df['win_ev'].round(2),
             '位置 EV': race_detail_df['place_ev'].round(2),
