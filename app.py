@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from bs4 import BeautifulSoup
 from streamlit_autorefresh import st_autorefresh
 import streamlit.components.v1 as components
+from github_csv_store import get_github_config, list_csv_files, download_file_bytes, upload_file_bytes
 
 # 頁面基本設定
 st.set_page_config(
@@ -32,7 +33,7 @@ st.session_state.pop('simulated_bets', None)
 if 'frozen_races' not in st.session_state:
     st.session_state['frozen_races'] = {}  # 格式: {race_no: "HH:MM:SS"}
 
-ENGINE_VERSION = 'asof-ranker-v2-20261111-backtest'
+ENGINE_VERSION = 'asof-ranker-v2-20261115-github-csv-fixed-stake'
 if st.session_state.get('prediction_engine_version') != ENGINE_VERSION:
     st.session_state.pop('df_data', None)
     st.session_state.pop('prediction_signature', None)
@@ -61,6 +62,75 @@ PLACE_DYNAMIC_PATH = RANKER_ROOT / 'dynamic_form' / 'my_hkjc_place_pair_candidat
 QP_PAIR_FIXED_PATH = RANKER_ROOT / 'fixed_form' / 'my_hkjc_qp_pair_ranker_candidate.pkl'
 QP_PAIR_DYNAMIC_PATH = RANKER_ROOT / 'dynamic_form' / 'my_hkjc_qp_pair_ranker_candidate.pkl'
 PREDICTION_CSV_PATH = APP_DIR / 'prediction.csv'
+GITHUB_CSV_CONFIG = get_github_config(st.secrets)
+GITHUB_CSV_ENABLED = bool(GITHUB_CSV_CONFIG.get('token'))
+FIXED_STAKE_HKD = 10.0
+
+def repo_csv_listing(folder):
+    """List repo CSVs, with a short per-session cache to avoid API calls on every rerun."""
+    if not GITHUB_CSV_ENABLED:
+        return []
+    now = time.time()
+    cache = st.session_state.setdefault('github_csv_listing_cache', {})
+    cache_key = f"{GITHUB_CSV_CONFIG['owner']}/{GITHUB_CSV_CONFIG['repo']}:{GITHUB_CSV_CONFIG['branch']}:{folder}"
+    cached = cache.get(cache_key)
+    if cached and now - cached.get('time', 0) < 60:
+        return cached.get('files', [])
+    try:
+        files = list_csv_files(
+            GITHUB_CSV_CONFIG['owner'], GITHUB_CSV_CONFIG['repo'], folder,
+            GITHUB_CSV_CONFIG['branch'], GITHUB_CSV_CONFIG['token']
+        )
+        cache[cache_key] = {'time': now, 'files': files}
+        st.session_state['github_csv_listing_error'] = None
+        return files
+    except Exception as exc:
+        st.session_state['github_csv_listing_error'] = f'{type(exc).__name__}: {exc}'
+        return cached.get('files', []) if cached else []
+
+def repo_csv_bytes(file_info):
+    """Download a selected CSV once per session/revision."""
+    if not GITHUB_CSV_ENABLED or not file_info:
+        return None
+    cache = st.session_state.setdefault('github_csv_bytes_cache', {})
+    cache_key = f"{file_info.get('path')}:{file_info.get('sha')}"
+    if cache_key not in cache:
+        cache[cache_key] = download_file_bytes(
+            GITHUB_CSV_CONFIG['owner'], GITHUB_CSV_CONFIG['repo'], file_info['path'],
+            GITHUB_CSV_CONFIG['branch'], GITHUB_CSV_CONFIG['token']
+        )
+    return cache[cache_key]
+
+def invalidate_repo_csv_cache():
+    st.session_state['github_csv_listing_cache'] = {}
+    st.session_state['github_csv_bytes_cache'] = {}
+
+def read_csv_bytes(payload):
+    """Read UTF-8 or HKJC Big5/CP950 CSV bytes without writing temporary files."""
+    last_error = None
+    for encoding in ('utf-8-sig', 'utf-8', 'cp950', 'big5'):
+        try:
+            return pd.read_csv(BytesIO(payload), encoding=encoding, low_memory=False)
+        except Exception as exc:
+            last_error = exc
+    raise ValueError(f'CSV讀取失敗：{last_error}')
+
+def csv_single_race_date(frame):
+    """Return YYYYMMDD only when all usable race IDs belong to one meeting date."""
+    if '賽事編號' not in frame.columns:
+        raise ValueError('CSV缺少「賽事編號」欄位。')
+    dates = frame['賽事編號'].astype(str).str.extract(r'(20\d{6})', expand=False).dropna().unique()
+    if len(dates) != 1:
+        raise ValueError(f'CSV必須只包含一個賽日；目前辨識到{len(dates)}個賽日。')
+    return str(dates[0])
+
+def safe_csv_filename(filename):
+    """Strip directory components and unsupported filename characters."""
+    name = Path(str(filename)).name
+    name = re.sub(r'[^0-9A-Za-z_.\-\u4e00-\u9fff]+', '_', name).strip('._')
+    if not name.lower().endswith('.csv'):
+        name += '.csv'
+    return name or 'upload.csv'
 FEATURE_COLS_15 = [
     'market_implied_prob', '獨贏賠率', 'odds_rank', 'is_favorite',
     '排位檔位', 'weight_diff', 'weight_rank',
@@ -128,16 +198,19 @@ else:
     st.sidebar.caption(f"預期 PLACE 模型路徑：`{PLACE_MODEL_PATH}`")
 
 @st.cache_data
-def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv', as_of_date=None, file_signature=''):
+def load_historical_stats(history_csv_path='hkjc_all_seasons_features.csv', as_of_date=None, file_signature='', history_csv_bytes=None):
     """只用目標賽日前已完成的正式出賽，計算15-feature歷史統計。"""
     csv_path = Path(__file__).resolve().parent / history_csv_path
-    if not csv_path.exists():
+    if history_csv_bytes is None and not csv_path.exists():
         return None
     try:
-        try:
-            hist_df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
-        except UnicodeDecodeError:
-            hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
+        if history_csv_bytes is not None:
+            hist_df = read_csv_bytes(history_csv_bytes)
+        else:
+            try:
+                hist_df = pd.read_csv(csv_path, encoding='utf-8-sig', low_memory=False)
+            except UnicodeDecodeError:
+                hist_df = pd.read_csv(csv_path, encoding='cp950', low_memory=False)
         if not {'賽事編號','名次','馬名','騎師','練馬師'}.issubset(hist_df.columns):
             raise ValueError('History缺少賽事編號、名次、馬名、騎師或練馬師欄位')
         hist_df['_race_date'] = pd.to_datetime(
@@ -312,21 +385,37 @@ def fetch_hkjc_racecard(race_date):
 # ==========================================
 st.sidebar.header("📂 預測資料")
 
-available_csvs = sorted([f.name for f in APP_DIR.glob("prediction*.csv")])
-
-if not available_csvs:
-    st.sidebar.caption("⚠️ 找不到任何 prediction*.csv 檔案。")
-    selected_csv_name = "prediction.csv"
+local_prediction_files = sorted([f.name for f in APP_DIR.glob("prediction*.csv")])
+github_prediction_files = repo_csv_listing('data/predictions')
+if GITHUB_CSV_ENABLED and st.session_state.get('github_csv_listing_error'):
+    st.sidebar.warning(f"GitHub CSV列表暫時讀取失敗：{st.session_state['github_csv_listing_error']}")
+prediction_choices = {}
+for filename in local_prediction_files:
+    prediction_choices[f"Repo：{filename}"] = ('local', filename, None)
+for file_info in github_prediction_files:
+    prediction_choices[f"GitHub：{file_info['path']}"] = ('github', file_info['name'], file_info)
+if not prediction_choices:
+    prediction_choices['本機 prediction.csv（如存在）'] = ('local', 'prediction.csv', None)
+pending_prediction_path = st.session_state.get('pending_github_prediction_path')
+pending_prediction_label = f"GitHub：{pending_prediction_path}" if pending_prediction_path else None
+if pending_prediction_label in prediction_choices:
+    st.session_state['repo_csv_selector'] = pending_prediction_label
+    st.session_state.pop('pending_github_prediction_path', None)
+selected_prediction_label = st.sidebar.selectbox(
+    "📜 選擇預測賽卡（Repo／GitHub）",
+    list(prediction_choices),
+    key="repo_csv_selector"
+)
+selected_prediction_source, selected_csv_name, selected_remote_prediction = prediction_choices[selected_prediction_label]
+if GITHUB_CSV_ENABLED:
+    st.sidebar.caption('GitHub預測檔目錄：data/predictions/；同一賽日再次儲存會覆蓋該賽日檔案。')
 else:
-    selected_csv_name = st.sidebar.selectbox(
-        "📜 選擇 Repo 內的預測賽卡", 
-        available_csvs,
-        key="repo_csv_selector"
-    )
+    st.sidebar.caption('GitHub CSV同步未啟用；需在Streamlit Secrets設定GitHub repo讀寫token。')
 
 # 偵測下拉選單是否被切換
-if st.session_state.get('active_csv_name') != selected_csv_name:
-    st.session_state['active_csv_name'] = selected_csv_name
+active_prediction_key = f"{selected_prediction_source}:{selected_remote_prediction['path'] if selected_remote_prediction else selected_csv_name}"
+if st.session_state.get('active_csv_name') != active_prediction_key:
+    st.session_state['active_csv_name'] = active_prediction_key
     st.session_state.pop('fetched_prediction_df', None)
     st.session_state.pop('df_data', None)
     st.session_state.pop('prediction_signature', None)
@@ -335,7 +424,7 @@ if st.session_state.get('active_csv_name') != selected_csv_name:
     st.session_state['frozen_races'] = {}
     st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
 
-SELECTED_CSV_PATH = APP_DIR / selected_csv_name
+SELECTED_CSV_PATH = APP_DIR / selected_csv_name if selected_prediction_source == 'local' else None
 
 race_date_choice = st.sidebar.date_input('選擇賽事日期 (抓新排位用)', value=datetime.now().date(), key='racecard_date_choice')
 if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=True, key='fetch_racecard_button'):
@@ -359,12 +448,37 @@ if st.sidebar.button('🏇 抓取排位並載入預測', use_container_width=Tru
         st.sidebar.error(f'抓取排位失敗：{type(exc).__name__}: {exc}')
 
 # 下載已抓取的預測 CSV 按鈕
+prediction_upload = st.sidebar.file_uploader(
+    '手機上傳當日預測 CSV（同一賽日會覆蓋）', type=['csv'], key='prediction_csv_upload'
+)
+if prediction_upload is not None and GITHUB_CSV_ENABLED and st.sidebar.button(
+    '☁️ 上傳／覆蓋當日預測 CSV', use_container_width=True, key='save_uploaded_prediction_github'
+):
+    try:
+        uploaded_prediction = read_csv_bytes(prediction_upload.getvalue())
+        if not {'賽事編號', '馬號', '馬名'}.issubset(uploaded_prediction.columns):
+            raise ValueError('預測CSV最少需要「賽事編號、馬號、馬名」欄位。')
+        prediction_date = csv_single_race_date(uploaded_prediction)
+        repo_path = f'data/predictions/prediction_{prediction_date}.csv'
+        saved = upload_file_bytes(
+            GITHUB_CSV_CONFIG['owner'], GITHUB_CSV_CONFIG['repo'], repo_path,
+            GITHUB_CSV_CONFIG['branch'], GITHUB_CSV_CONFIG['token'], prediction_upload.getvalue(),
+            f'Save prediction card {prediction_date}'
+        )
+        invalidate_repo_csv_cache()
+        st.session_state['pending_github_prediction_path'] = saved['path']
+        st.sidebar.success(f"已儲存／覆蓋 {saved['path']}；正在載入雲端檔。")
+        st.rerun()
+    except Exception as exc:
+        st.sidebar.error(f'上傳預測CSV失敗：{type(exc).__name__}: {exc}')
+
 if st.session_state.get('fetched_prediction_df') is not None:
     csv_bytes_pred = st.session_state['fetched_prediction_df'].to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+    prediction_export_date = st.session_state.get('fetched_prediction_date', race_date_choice).strftime('%Y%m%d')
     st.sidebar.download_button(
         label="⬇️ 下載已抓取的預測 CSV",
         data=csv_bytes_pred,
-        file_name=f"prediction_{datetime.now().strftime('%Y%m%d')}.csv",
+        file_name=f"prediction_{prediction_export_date}.csv",
         mime="text/csv",
         use_container_width=True,
         help="將含有最新檔位與賽道的預測表下載到電腦，放回 GitHub 即可永久使用！"
@@ -384,12 +498,57 @@ if current_fetched_card is not None:
 else:
     st.sidebar.caption(f"目前使用選單檔案：{selected_csv_name}")
 
-backtest_file = st.sidebar.file_uploader(
-    "回測用：上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
+backtest_upload = st.sidebar.file_uploader(
+    "回測用：可上傳已完成賽事 CSV（需要賽事編號、馬號、名次）",
     type=['csv'],
     key='backtest_results_upload',
-    help='WIN只按CSV中官方最終獨贏賠率作回收；PLACE需提供每$10官方位置派彩，QP需提供逐組官方派彩，缺項時只報命中率。',
+    help='WIN及PLACE只有提供官方每$10派彩才計ROI；QP本版只報兩匹同入位命中率，不估算QP派彩或ROI。',
 )
+if backtest_upload is not None and GITHUB_CSV_ENABLED and st.sidebar.button(
+    '☁️ 儲存／覆蓋完賽結果到GitHub', use_container_width=True, key='save_result_csv_github'
+):
+    try:
+        uploaded_results = read_csv_bytes(backtest_upload.getvalue())
+        required_result_cols = {'賽事編號','馬號','名次'}
+        if not required_result_cols.issubset(uploaded_results.columns):
+            raise ValueError(f"完賽CSV缺少必要欄位：{sorted(required_result_cols - set(uploaded_results.columns))}")
+        result_date = csv_single_race_date(uploaded_results)
+        result_path = f'data/results/results_{result_date}.csv'
+        saved = upload_file_bytes(
+            GITHUB_CSV_CONFIG['owner'], GITHUB_CSV_CONFIG['repo'], result_path,
+            GITHUB_CSV_CONFIG['branch'], GITHUB_CSV_CONFIG['token'], backtest_upload.getvalue(),
+            f'Save official results {result_date}'
+        )
+        invalidate_repo_csv_cache()
+        st.session_state['pending_github_result_path'] = saved['path']
+        st.sidebar.success(f"已儲存／覆蓋 {saved['path']}；正在選取此賽果。")
+        st.rerun()
+    except Exception as exc:
+        st.sidebar.error(f'儲存完賽結果失敗：{type(exc).__name__}: {exc}')
+
+github_result_files = repo_csv_listing('data/results')
+github_result_choices = {f"GitHub：{item['path']}": item for item in sorted(github_result_files, key=lambda x: x['name'], reverse=True)}
+result_source_options = (['本次手動上傳'] if backtest_upload is not None else []) + list(github_result_choices)
+if not result_source_options:
+    result_source_options = ['暫不載入賽果']
+pending_result_path = st.session_state.get('pending_github_result_path')
+pending_result_label = f'GitHub：{pending_result_path}' if pending_result_path else None
+if pending_result_label in result_source_options:
+    st.session_state['result_source_selector'] = pending_result_label
+    st.session_state.pop('pending_github_result_path', None)
+selected_result_source = st.sidebar.selectbox('回測賽果來源', result_source_options, key='result_source_selector')
+backtest_file = None
+backtest_file_source_label = None
+if selected_result_source == '本次手動上傳' and backtest_upload is not None:
+    backtest_file = backtest_upload
+    backtest_file_source_label = '手動上傳賽果'
+elif selected_result_source in github_result_choices:
+    try:
+        remote_result_info = github_result_choices[selected_result_source]
+        backtest_file = BytesIO(repo_csv_bytes(remote_result_info))
+        backtest_file_source_label = f"GitHub賽果：{remote_result_info['name']}"
+    except Exception as exc:
+        st.sidebar.error(f'讀取GitHub賽果失敗：{type(exc).__name__}: {exc}')
 
 # ==========================================
 # ⚙️ 策略、資金與算分引擎設定
@@ -436,9 +595,7 @@ min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_valu
 max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_value=100.0, value=100.0)
 
 st.sidebar.markdown("---")
-st.sidebar.header("💰 資金管理 (凱利注碼精算)")
-total_bankroll = st.sidebar.number_input("💵 單日總本金預算 (HKD)", min_value=100, max_value=1000000, value=500, step=500)
-kelly_fraction = st.sidebar.slider("🎛️ 凱利保守係數", 0.05, 1.0, 0.15, 0.05)
+st.sidebar.caption(f"回測注碼固定：每注 HK${FIXED_STAKE_HKD:.0f}；所有策略使用相同固定注額。")
 
 # ==========================================
 # 🛠️ 歷史賽果 15 大特徵資料抓取工具 (防彈升級版 + 賽道抓取)
@@ -799,6 +956,16 @@ if fetched_prediction_df is not None:
     source_label = f"HKJC {fetched_date:%Y-%m-%d} 官方排位抓取"
     prediction_signature = st.session_state.get('fetched_prediction_signature', source_label)
     st.sidebar.success(f'預測來源：{source_label}（{len(df_raw)} 匹）')
+elif selected_prediction_source == 'github' and selected_remote_prediction:
+    try:
+        remote_payload = repo_csv_bytes(selected_remote_prediction)
+        df_raw = read_csv_bytes(remote_payload)
+        source_label = f"GitHub：{selected_remote_prediction['path']}"
+        prediction_signature = f"{selected_remote_prediction['path']}:{selected_remote_prediction.get('sha','')}"
+        st.sidebar.success(f"已從GitHub載入：{selected_remote_prediction['name']}（{len(df_raw)}匹）")
+    except Exception as exc:
+        st.sidebar.error(f'讀取GitHub預測卡失敗：{type(exc).__name__}: {exc}')
+        st.stop()
 elif SELECTED_CSV_PATH.is_file():
     try:
         df_raw = pd.read_csv(SELECTED_CSV_PATH, encoding='utf-8-sig')
@@ -839,12 +1006,20 @@ archived_prediction_card = bool(
     and race_date_values.nunique() == 1
     and race_date_values.iloc[0].date() < datetime.now(hk_timezone).date()
 )
-saved_odds_snapshot = bool(
-    fetched_prediction_df is None
-    and SELECTED_CSV_PATH.is_file()
-    and 'bet_odds_updated' in SELECTED_CSV_PATH.stem.lower()
+remote_has_saved_prices = bool(
+    selected_prediction_source == 'github' and selected_remote_prediction is not None
+    and any(
+        pd.to_numeric(df_raw.get(column, pd.Series(dtype=float)), errors='coerce').gt(1.0).any()
+        for column in ('獨贏賠率', '位置賠率')
+    )
 )
-archived_prediction_card = archived_prediction_card or saved_odds_snapshot
+saved_odds_snapshot = bool(
+    fetched_prediction_df is None and archived_prediction_card and (
+        remote_has_saved_prices
+        or (SELECTED_CSV_PATH is not None and SELECTED_CSV_PATH.is_file()
+            and 'bet_odds_updated' in SELECTED_CSV_PATH.stem.lower())
+    )
+)
 if fetched_prediction_df is None and not archived_prediction_card:
     df_raw['獨贏賠率'] = np.nan
     df_raw['位置賠率'] = np.nan
@@ -981,6 +1156,25 @@ st.sidebar.download_button(
     use_container_width=True,
     help='將目前畫面上的賠率與設定（包含你逐場凍結的買時賠率與跑法）完整打包下載，放到 GitHub 即可隨時重現 100% 真實買時回測！'
 )
+if GITHUB_CSV_ENABLED and st.sidebar.button(
+    f'☁️ 保存／覆蓋到GitHub（{dl_date_tag}）', use_container_width=True, key='save_current_prediction_snapshot_github'
+):
+    try:
+        validated_snapshot_date = csv_single_race_date(df)
+        if validated_snapshot_date != dl_date_tag:
+            raise ValueError('此預測快照賽日不一致，已停止保存以免覆蓋錯誤檔案。')
+        saved = upload_file_bytes(
+            GITHUB_CSV_CONFIG['owner'], GITHUB_CSV_CONFIG['repo'],
+            f'data/predictions/prediction_{dl_date_tag}.csv',
+            GITHUB_CSV_CONFIG['branch'], GITHUB_CSV_CONFIG['token'], snapshot_csv_bytes,
+            f'Save prediction odds snapshot {dl_date_tag}'
+        )
+        invalidate_repo_csv_cache()
+        if selected_prediction_source == 'github' and selected_remote_prediction is not None and selected_remote_prediction.get('path') == saved['path']:
+            st.session_state['prediction_signature'] = f"{saved['path']}:{saved['sha']}"
+        st.sidebar.success(f"已保存／覆蓋 {saved['path']}")
+    except Exception as exc:
+        st.sidebar.error(f'保存預測快照失敗：{type(exc).__name__}: {exc}')
 
 # === 計算早盤 vs 臨場賠率變動 (落飛追蹤) ===
 baseline_map = st.session_state.get('baseline_odds_map', {})
@@ -1034,9 +1228,68 @@ if '場地' not in df.columns:
 race_date_text = df['賽事編號'].astype(str).str.extract(r'(20\d{6})', expand=False)
 parsed_race_dates = pd.to_datetime(race_date_text, format='%Y%m%d', errors='coerce')
 as_of_date = parsed_race_dates.min()
-history_path = APP_DIR / 'hkjc_all_seasons_features.csv'
+st.sidebar.markdown('---')
+st.sidebar.header('🗃️ Training History CSV')
+github_history_files = repo_csv_listing('data/training')
+history_upload = st.sidebar.file_uploader('上傳／更新Training用History CSV', type=['csv'], key='training_history_upload')
+if history_upload is not None and GITHUB_CSV_ENABLED and st.sidebar.button(
+    '☁️ 儲存／覆蓋Training CSV到GitHub', use_container_width=True, key='save_training_csv_github'
+):
+    try:
+        uploaded_history = read_csv_bytes(history_upload.getvalue())
+        required_history_cols = {'賽事編號','名次','馬號','馬名','騎師','練馬師'}
+        if not required_history_cols.issubset(uploaded_history.columns):
+            raise ValueError(f"Training CSV缺少必要欄位：{sorted(required_history_cols - set(uploaded_history.columns))}")
+        training_name = safe_csv_filename(history_upload.name)
+        training_path = f'data/training/{training_name}'
+        saved = upload_file_bytes(
+            GITHUB_CSV_CONFIG['owner'], GITHUB_CSV_CONFIG['repo'], training_path,
+            GITHUB_CSV_CONFIG['branch'], GITHUB_CSV_CONFIG['token'], history_upload.getvalue(),
+            f'Update training History CSV {training_name}'
+        )
+        invalidate_repo_csv_cache()
+        st.session_state['pending_github_history_path'] = saved['path']
+        st.sidebar.success(f"已儲存／覆蓋 {saved['path']}；正在套用此History。")
+        st.rerun()
+    except Exception as exc:
+        st.sidebar.error(f'儲存Training CSV失敗：{type(exc).__name__}: {exc}')
+
+history_choices = {}
+local_history_path = APP_DIR / 'hkjc_all_seasons_features.csv'
+if local_history_path.is_file():
+    history_choices['Repo：hkjc_all_seasons_features.csv'] = ('local', None)
+for item in sorted(github_history_files, key=lambda x: x['name'].lower()):
+    history_choices[f"GitHub：{item['path']}"] = ('github', item)
+if not history_choices:
+    history_choices['History未設定'] = ('missing', None)
+pending_history_path = st.session_state.get('pending_github_history_path')
+pending_history_label = f'GitHub：{pending_history_path}' if pending_history_path else None
+if pending_history_label in history_choices:
+    st.session_state['history_source_selector'] = pending_history_label
+    st.session_state.pop('pending_github_history_path', None)
+history_source_label = st.sidebar.selectbox('選擇模型歷史資料', list(history_choices), key='history_source_selector')
+history_source, selected_history_info = history_choices[history_source_label]
+history_csv_bytes = None
+history_path = local_history_path
 history_signature = _model_file_signature(history_path)
-hist_stats = load_historical_stats('hkjc_all_seasons_features.csv', as_of_date.strftime('%Y-%m-%d') if pd.notna(as_of_date) else None, history_signature)
+if history_source == 'github':
+    try:
+        history_csv_bytes = repo_csv_bytes(selected_history_info)
+        history_signature = f"{selected_history_info['path']}:{selected_history_info.get('sha','')}"
+        st.sidebar.caption(f"目前使用GitHub History：{selected_history_info['name']}")
+    except Exception as exc:
+        st.sidebar.error(f'讀取GitHub Training CSV失敗：{type(exc).__name__}: {exc}')
+        history_csv_bytes = b''
+elif history_source == 'missing':
+    history_path = APP_DIR / 'history-not-configured.csv'
+    st.sidebar.error('請上傳Training History CSV至GitHub或放入repo根目錄。')
+else:
+    st.sidebar.caption('目前使用repo根目錄的hkjc_all_seasons_features.csv。')
+
+hist_stats = load_historical_stats(
+    str(history_path.name), as_of_date.strftime('%Y-%m-%d') if pd.notna(as_of_date) else None,
+    history_signature, history_csv_bytes
+)
 history_features_ok = hist_stats is not None
 if hist_stats is not None:
     (
@@ -1208,15 +1461,9 @@ df['smart_score_win'] = df['pred_win_prob'] * total_tactical_adj
 df['smart_score_place'] = df['pred_place_prob'] * total_tactical_adj
 df['smart_score'] = df['smart_score_win']
 
-# 💰 7. 雙重凱利注碼精算 (獨贏注碼 & 位置注碼)
-safe_win_odds = np.maximum(df['獨贏賠率'], 1.01)
-df['kelly_pct_win'] = np.clip((df['win_ev'] - 1.0) / (safe_win_odds - 1.0), 0.0, 1.0).fillna(0.0)
-df['suggested_stake_win'] = np.floor((total_bankroll * df['kelly_pct_win'] * kelly_fraction) / 10) * 10
-df['suggested_stake'] = df['suggested_stake_win']
-
-safe_place_odds = np.maximum(df['位置賠率'], 1.01)
-df['kelly_pct_place'] = np.clip((df['place_ev'] - 1.0) / (safe_place_odds - 1.0), 0.0, 1.0).fillna(0.0)
-df['suggested_stake_place'] = np.floor((total_bankroll * df['kelly_pct_place'] * kelly_fraction) / 10) * 10
+# Fixed, standardized stake for backtest comparability; EV remains a selection metric only.
+df['fixed_stake_win'] = FIXED_STAKE_HKD
+df['fixed_stake_place'] = FIXED_STAKE_HKD
 
 # 🚀 核心雙軌過濾與排序邏輯 (支援 bet_type 分流)
 def filter_and_sort_group(group, mode, min_ev_val, min_odds_val, max_odds_val, bet_type="win"):
@@ -1265,7 +1512,7 @@ if backtest_file is not None:
         except UnicodeDecodeError:
             backtest_file.seek(0)
             result_raw = pd.read_csv(backtest_file, encoding='cp950')
-        result_source_label = '手動上傳賽果'
+        result_source_label = backtest_file_source_label or '已選擇賽果CSV'
         
         required_result_cols = ['賽事編號', '馬號', '名次']
         missing_result_cols = [c for c in required_result_cols if c not in result_raw.columns]
@@ -1626,12 +1873,12 @@ with tab1:
             win_pick = (
                 f"馬號 {top1['馬號']} ({top1['馬名']}) "
                 f"[AI勝率:{top1['pred_win_prob']*100:.1f}% | {last_r_str} | 賠率:{top1['基準賠率']:.1f}➔{top1['獨贏賠率']:.1f} | 獨EV:{top1['win_ev']:.2f}] "
-                f"💰${top1['suggested_stake_win']:.0f} {top1['資金流向']}"
+                f"固定注碼:${FIXED_STAKE_HKD:.0f} {top1['資金流向']}"
             )
             
         if len(sorted_place) >= 1:
             p1 = sorted_place.iloc[0]
-            q_pick = f"單膽位置: {p1['馬號']} ({p1['馬名']}) [位EV:{p1['place_ev']:.2f}] 💰${p1['suggested_stake_place']:.0f}"
+            q_pick = f"單膽位置: {p1['馬號']} ({p1['馬名']}) [位EV:{p1['place_ev']:.2f}] 固定注碼:${FIXED_STAKE_HKD:.0f}"
         elif not qp_candidates.empty:
             p1 = qp_candidates.iloc[0]
             q_pick = f"單膽位置候選: {p1['馬號']} ({p1['馬名']}) [AI入位率:{p1['pred_place_prob']*100:.0f}%；未有官方位置價，不計EV]"
@@ -1710,8 +1957,8 @@ with tab1:
             '獨贏 EV': race_detail_df['win_ev'].round(2),
             '位置 EV': race_detail_df['place_ev'].round(2),
             '抗噪分': (race_detail_df['smart_score_win'] * 100).round(1),
-            '獨贏注碼': race_detail_df['suggested_stake_win'].apply(lambda x: f"${x:.0f}"),
-            '位置注碼': race_detail_df['suggested_stake_place'].apply(lambda x: f"${x:.0f}")
+            '固定WIN注碼': f"${FIXED_STAKE_HKD:.0f}",
+            '固定位置注碼': f"${FIXED_STAKE_HKD:.0f}"
         })
         st.dataframe(display_detail, use_container_width=True, hide_index=True)
 
@@ -1745,8 +1992,7 @@ with tab2:
                 sorted_group = filter_and_sort_group(group, strategy_mode, min_win_ev, min_odds, max_odds, bet_type="win")
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
-                    raw_stake = pick.get('suggested_stake_win', 10)
-                    stake = max(10, float(raw_stake) if pd.notna(raw_stake) else 10)
+                    stake = FIXED_STAKE_HKD
                     
                     win_bets += 1
                     win_invested += stake
@@ -1774,7 +2020,7 @@ with tab2:
                         '官方獨贏派彩（每$10）': round(win_dividend, 2) if pd.notna(win_dividend) else '未提供',
                         'AI勝率': f"{pick['pred_win_prob']*100:.1f}%",
                         '買時 獨贏EV': round(pick['win_ev'], 2),
-                        '凱利注碼': f"${stake:.0f}",
+                        '固定注碼（每注$10）': f"${stake:.0f}",
                         '結果': result_str,
                         '派彩': f"${payout:.1f}" if pd.notna(payout) else '不計（缺官方派彩）',
                         '淨盈虧': f"${payout - stake:.1f}" if pd.notna(payout) else '不計（缺官方派彩）'
@@ -1797,13 +2043,13 @@ with tab2:
         with sub_tab2:
             st.markdown("#### 🥈 位置（PLACE）策略回測 — 使用目前選定的PLACE引擎")
             place_invested, place_return, place_bets, place_hits = 0, 0, 0, 0
+            place_missing_dividend = False
             place_records = []
             for race_id, group in df_backtest.groupby('賽事編號'):
                 sorted_group = filter_and_sort_group(group, strategy_mode, min_place_ev, min_odds, max_odds, bet_type="place")
                 if len(sorted_group) > 0:
                     pick = sorted_group.iloc[0]
-                    raw_stake = pick.get('suggested_stake_place', 10)
-                    stake = max(10, float(raw_stake) if pd.notna(raw_stake) else 10)
+                    stake = FIXED_STAKE_HKD
                     
                     place_bets += 1
                     place_invested += stake
@@ -1811,9 +2057,13 @@ with tab2:
                     is_hit = (1 <= pick['numeric_rank'] <= slots) if slots else False
                     settlement_place_dividend = pick.get('回測位置派彩', np.nan)
                     p_dividend = float(settlement_place_dividend) if pd.notna(settlement_place_dividend) and float(settlement_place_dividend) > 0 else np.nan
-                    payout = stake * p_dividend / 10.0 if is_hit and pd.notna(p_dividend) else np.nan
+                    payout = stake * p_dividend / 10.0 if is_hit and pd.notna(p_dividend) else (np.nan if is_hit else 0.0)
                     if is_hit:
                         place_hits += 1
+                        if pd.notna(payout):
+                            place_return += payout
+                        else:
+                            place_missing_dividend = True
                         result_str = "✅ 命中位置"
                     else:
                         result_str = "❌ 未入位"
@@ -1827,7 +2077,7 @@ with tab2:
                         'AI入位率': f"{pick['pred_place_prob']*100:.1f}%",
                         '買時 位置EV': round(pick['place_ev'], 2),
                         '官方位置派彩（每$10）': round(p_dividend, 2) if pd.notna(p_dividend) else '未提供',
-                        '凱利注碼': f"${stake:.0f}",
+                        '固定注碼（每注$10）': f"${stake:.0f}",
                         '結果': result_str,
                         '派彩': f"${payout:.1f}" if pd.notna(payout) else '不計（缺官方派彩）',
                         '淨盈虧': f"${payout - stake:.1f}" if pd.notna(payout) else '不計（缺官方派彩）'
@@ -1836,7 +2086,11 @@ with tab2:
                 col1, col2, col3 = st.columns(3)
                 col1.metric("投注場數", f"{place_bets} 場")
                 col2.metric("命中位置場數", f"{place_hits} 場", f"位置率: {place_hits/place_bets*100:.1f}%")
-                col3.metric("ROI", "未計算", "需要官方位置派彩")
+                if not place_missing_dividend:
+                    place_roi = ((place_return - place_invested) / place_invested) * 100
+                    col3.metric("官方派彩ROI", f"{place_roi:.2f}%", f"官方回收 ${place_return:,.1f}")
+                else:
+                    col3.metric("ROI", "未計算", "中獎注缺官方位置派彩")
                 st.caption("位置報價不等於官方派彩；沒有官方派彩欄時只報命中率。")
                 st.markdown("##### 📝 位置明細")
                 st.dataframe(pd.DataFrame(place_records), use_container_width=True, hide_index=True)
@@ -1862,7 +2116,7 @@ with tab2:
                     chosen_pair = (sorted_group.iloc[0], sorted_group.iloc[1]) if len(sorted_group) >= 2 else None
                 if chosen_pair is not None:
                     top1, top2 = chosen_pair
-                    stake = max(10, min(float(top1.get('suggested_stake_place',10) if pd.notna(top1.get('suggested_stake_place')) else 10), float(top2.get('suggested_stake_place',10) if pd.notna(top2.get('suggested_stake_place')) else 10)))
+                    stake = FIXED_STAKE_HKD
                     
                     qp_bets += 1
                     qp_invested += stake
@@ -1886,7 +2140,7 @@ with tab2:
                         'AI入位率': f"{top1['pred_place_prob']*100:.0f}% / {top2['pred_place_prob']*100:.0f}%",
                         '實際名次': f"首選:第{str(top1['名次']).replace('.0','')}名 | 次選:第{str(top2['名次']).replace('.0','')}名",
                         '官方QP派彩': '未提供',
-                        '凱利注碼': f"${stake:.0f}",
+                        '固定注碼（每注$10）': f"${stake:.0f}",
                         '結果': result_str,
                         '派彩': '不計（缺官方QP派彩）',
                         '淨盈虧': '不計（缺官方QP派彩）'
@@ -1906,6 +2160,7 @@ with tab2:
             st.markdown("#### 🥉 3匹位置包抄 (3x Place) 策略回測 — 由 `my_hkjc_place_model.pkl` 驅動")
             st.caption("策略邏輯：每場買入位置模型推薦最高分的 3 匹馬位置。")
             p3_invested, p3_return, p3_bets, p3_hits = 0, 0, 0, 0
+            p3_missing_dividend = False
             p3_records = []
             
             for race_id, group in df_backtest.groupby('賽事編號'):
@@ -1913,8 +2168,7 @@ with tab2:
                 picks = sorted_group.head(3)
                 
                 for _, pick in picks.iterrows():
-                    raw_stake = pick.get('suggested_stake_place', 10)
-                    stake = max(10, float(raw_stake) if pd.notna(raw_stake) else 10)
+                    stake = FIXED_STAKE_HKD
                     
                     p3_bets += 1
                     p3_invested += stake
@@ -1923,9 +2177,13 @@ with tab2:
                     
                     settlement_place_dividend = pick.get('回測位置派彩', np.nan)
                     p_dividend = float(settlement_place_dividend) if pd.notna(settlement_place_dividend) and float(settlement_place_dividend) > 0 else np.nan
-                    payout = stake * p_dividend / 10.0 if is_hit and pd.notna(p_dividend) else np.nan
+                    payout = stake * p_dividend / 10.0 if is_hit and pd.notna(p_dividend) else (np.nan if is_hit else 0.0)
                     if is_hit:
                         p3_hits += 1
+                        if pd.notna(payout):
+                            p3_return += payout
+                        else:
+                            p3_missing_dividend = True
                         result_str = "✅ 命中位置"
                     else:
                         result_str = "❌ 未入前三"
@@ -1938,7 +2196,7 @@ with tab2:
                         'AI入位率': f"{pick['pred_place_prob']*100:.1f}%",
                         '官方位置派彩（每$10）': round(p_dividend, 2) if pd.notna(p_dividend) else '未提供',
                         '買時 位置EV': round(pick['place_ev'], 2),
-                        '凱利注碼': f"${stake:.0f}",
+                        '固定注碼（每注$10）': f"${stake:.0f}",
                         '結果': result_str,
                         '派彩': f"${payout:.1f}" if pd.notna(payout) else '不計（缺官方派彩）',
                         '淨盈虧': f"${payout - stake:.1f}" if pd.notna(payout) else '不計（缺官方派彩）'
@@ -1948,8 +2206,12 @@ with tab2:
                 col1, col2, col3 = st.columns(3)
                 col1.metric("總投注注數", f"{p3_bets} 注")
                 col2.metric("命中注數", f"{p3_hits} 注", f"位置率: {p3_hits/p3_bets*100:.1f}%")
-                col3.metric("ROI", "未計算", "需要官方位置派彩")
-                st.caption("此處只報入位命中率；位置報價不等於官方派彩。")
+                if not p3_missing_dividend:
+                    p3_roi = ((p3_return - p3_invested) / p3_invested) * 100
+                    col3.metric("官方派彩ROI", f"{p3_roi:.2f}%", f"官方回收 ${p3_return:,.1f}")
+                else:
+                    col3.metric("ROI", "未計算", "中獎注缺官方位置派彩")
+                st.caption("位置報價不等於官方派彩；只有官方每$10派彩才納入ROI。")
                 st.markdown("##### 📝 3匹位置包抄明細")
                 st.dataframe(pd.DataFrame(p3_records), use_container_width=True, hide_index=True)
             else:

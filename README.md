@@ -13,6 +13,8 @@
 - **回測保護**：候選最終模型的訓練截止日為2026-10-28；App會排除同日及更早賽事，避免以最終模型回測它已學過的賽果。
 - **派彩標示**：位置命中按有效出賽馬數的入位席位計算。WIN／PLACE只有結果檔有官方每$10派彩才計算收益與ROI；否則只報命中率。缺逐組QP官方派彩時不估QP ROI。最終賠率不會當作派彩。
 - **防止單日過擬合**：移除用同一批賽果反覆挑最高ROI參數的尋優按鈕。
+- **GitHub CSV雲端管理**：預測賽卡、Training History及官方完賽結果可在手機直接上傳到GitHub，按日期或檔名覆蓋，並在App內下拉選取；History載入後仍逐賽日做past-only截斷。
+- **取消Kelly注碼選項**：移除本金及Kelly係數控制；回測採用固定每注HK$10，讓不同版本可以用相同注碼比較，EV仍只作篩選/排序。
 
 ## 主要檔案
 
@@ -31,6 +33,26 @@
 5. **回測2026-11-01及之後賽事命中率**：左側「選擇Repo內的預測賽卡」先選對應日期的 `prediction_YYYYMMDD.csv`，再上傳該日包含 `賽事編號`、`馬號`、`名次` 的完賽結果CSV。App會按賽事編號＋馬號配對，並顯示WIN首選命中率、PLACE入位率及QP兩匹同時入位率。候選模型訓練截止日為2026-10-28，因此11月1日起可作時間外回測；不能用11月1日前已被最終模型學過的賽果宣稱外測。
 6. 歷史預測CSV內的賠率只有在原始檔保存時點確實早於開跑、且未被賽後終盤價覆寫時，才可代表當時盤口。若CSV沒有快照時間戳，App會標明其為存檔價，不能證明它是例如「開跑前30分鐘」的報價；要測某一時點的實戰命中，應使用當時匯出的預測檔／Odds Snapshot。App會將預測卡WIN價與完賽CSV最終WIN價比對；高度一致時，因模型15項特徵包含WIN賠率、市場勝率和賠率排名，會顯示「事後資訊」警告。已查到repo的 `prediction_20261101.csv` 有效WIN價與完賽CSV最終價全部相同，故該日只能作事後診斷，不能代表真實賽前準確率。非出賽馬會按結果CSV未有正式名次剔除；若有效出賽馬缺模型分數，該場會排除並提示。
 7. 要計算WIN回收，結果檔亦須有官方每$10獨贏派彩；PLACE需有每$10官方位置派彩欄（支援 `位置派彩`、`PLACE派彩`、`官方位置派彩`、`Place Dividend`、`place_dividend`）。QP若沒有逐組官方QP派彩，只顯示命中率。
+
+## 手機直接保存與選取GitHub CSV
+
+首次需在 Streamlit Cloud 的 App 設定中開啟 **Secrets**，加入具目標repo `Contents: Read and write` 最小權限的 Fine-grained GitHub token。不要把真實token提交到GitHub，也不要貼到聊天訊息。此App預設將CSV寫入 `hkjc-data` 分支，以免每次存檔都觸發正式 `main` 分支的Streamlit程式重新部署：
+
+```toml
+[github]
+owner = "tomlo6c316-git"
+repo = "Horse_manus"
+branch = "hkjc-data"
+token = "填入你在GitHub建立的Fine-grained token"
+```
+
+App畫面可直接上傳及保存：
+
+- 預測卡：存到 `data/predictions/prediction_YYYYMMDD.csv`；同一賽日再次上傳會覆蓋。
+- Training History：存到 `data/training/原檔名.csv`；再次上傳同名檔會覆蓋。下方「選擇模型歷史資料」可直接選擇GitHub檔案。
+- 完賽結果：需含 `賽事編號`、`馬號`、`名次`，存到 `data/results/results_YYYYMMDD.csv`；同一賽日再次上傳會覆蓋。完成後可在「回測賽果來源」下拉選取。
+
+若在本機測試，也可把同一組設定放入本機 `.streamlit/secrets.toml`；該檔已列入 `.gitignore`，不得加入提交。
 
 ## 時間留出測試摘要（不是ROI保證）
 
