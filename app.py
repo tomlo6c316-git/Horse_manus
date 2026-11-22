@@ -9,6 +9,8 @@ import re
 import time
 import hashlib
 import json
+import html
+import threading
 from io import StringIO
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
@@ -32,7 +34,6 @@ st.markdown("---")
 st.session_state.pop('simulated_bets', None)
 if 'frozen_races' not in st.session_state:
     st.session_state['frozen_races'] = {}  # 格式: {race_no: "HH:MM:SS"}
-
 ENGINE_VERSION = 'asof-ranker-v2-20261115-github-csv-fixed-stake'
 if st.session_state.get('prediction_engine_version') != ENGINE_VERSION:
     st.session_state.pop('df_data', None)
@@ -422,6 +423,7 @@ if st.session_state.get('active_csv_name') != active_prediction_key:
     st.session_state.pop('baseline_odds_map', None)
     st.session_state.pop('baseline_locked_time', None)
     st.session_state['frozen_races'] = {}
+    st.session_state.pop('last_auto_odds_fetch_epoch', None)
     st.session_state['odds_editor_version'] = st.session_state.get('odds_editor_version', 0) + 1
 
 SELECTED_CSV_PATH = APP_DIR / selected_csv_name if selected_prediction_source == 'local' else None
@@ -581,8 +583,9 @@ place_labels = {}
 if model_place is not None: place_labels['舊PLACE模型（Dynamic）'] = 'legacy_place_dynamic'
 if model_place_fixed is not None: place_labels['新PLACE模型（Fixed）'] = 'place_fixed'
 if model_place_dynamic is not None: place_labels['新PLACE模型（Dynamic）'] = 'place_dynamic'
-place_default = next((i for i,k in enumerate(place_labels) if k == 'place_fixed'), 0)
+place_default = next((i for i,k in enumerate(place_labels) if k == 'place_dynamic'), 0)
 place_model_choice = st.sidebar.selectbox('3️⃣ PLACE引擎（入位排序）', list(place_labels) or ['無可用PLACE模型'], index=place_default,
+    key='place_model_choice_default_dynamic_v1',
     help='選擇舊版Dynamic或新版Fixed/Dynamic PLACE模型；此選擇會影響位置候選及以PLACE馬匹組合構成的QP。')
 place_mode = place_labels.get(place_model_choice, 'legacy_place_dynamic')
 place_dynamic_form = place_mode.endswith('dynamic')
@@ -590,10 +593,16 @@ place_dynamic_form = place_mode.endswith('dynamic')
 qp_labels = {'以單馬PLACE排序組成QP': 'place_top2'}
 if model_qp_fixed is not None: qp_labels['直接QP雙馬排序器（Fixed）'] = 'qp_fixed'
 if model_qp_dynamic is not None: qp_labels['直接QP雙馬排序器（Dynamic）'] = 'qp_dynamic'
-qp_choice = st.sidebar.selectbox('4️⃣ 位置Q/QP組合排序', list(qp_labels), index=0,
+qp_default = next((i for i,k in enumerate(qp_labels) if k == 'qp_dynamic'), 0)
+qp_choice = st.sidebar.selectbox('4️⃣ 位置Q/QP組合排序', list(qp_labels), index=qp_default,
+    key='qp_model_choice_default_dynamic_v1',
     help='直接QP模型以歷史同場馬匹配對是否同時入位為目標；若模型不可用，保留PLACE前兩名組合。')
 qp_mode = qp_labels[qp_choice]
 qp_dynamic_form = qp_mode == 'qp_dynamic'
+if model_place_dynamic is None:
+    st.sidebar.warning('找不到新版Dynamic PLACE模型；無法以它作預設，請確認模型檔已部署。')
+if model_qp_dynamic is None:
+    st.sidebar.warning('找不到Dynamic直接QP模型；目前會退回可用QP選項，請確認模型檔已部署。')
 min_win_ev = st.sidebar.slider("🥇 獨贏最小期望值 (Win EV)", 0.0, 6.0, 0.0, 0.1)
 min_place_ev = st.sidebar.slider("🥉 位置最小期望值 (Place EV)", 0.0, 6.0, 0.0, 0.1)
 min_odds = st.sidebar.number_input("最低獨贏賠率", min_value=1.0, max_value=50.0, value=1.0, help="預設1.0代表純AI命中率評估不以最低賠率篩馬；提高門檻會改變候選母體。位置彩池會自動將此門檻除以3。")
@@ -601,6 +610,28 @@ max_odds = st.sidebar.number_input("最高獨贏賠率", min_value=1.0, max_valu
 
 st.sidebar.markdown("---")
 st.sidebar.caption(f"回測注碼固定：每注 HK${FIXED_STAKE_HKD:.0f}；所有策略使用相同固定注額。")
+
+st.sidebar.markdown("---")
+st.sidebar.header("✈️ Telegram 通知設定")
+enable_tg = st.sidebar.checkbox(
+    "開啟 Telegram 通知與指令監聽", value=True, key="telegram_notifications_enabled_v1"
+)
+tg_token = st.sidebar.text_input("Bot Token", value=st.secrets.get("TELEGRAM_BOT_TOKEN", ""), type="password")
+tg_chat_id = st.sidebar.text_input("Chat ID", value=str(st.secrets.get("TELEGRAM_CHAT_ID", "")))
+if enable_tg and not (tg_token.strip() and tg_chat_id.strip()):
+    st.sidebar.warning("Telegram已預設開啟；請在Streamlit Secrets設定 TELEGRAM_BOT_TOKEN 和 TELEGRAM_CHAT_ID，才能實際收發訊息。")
+tg_poll_interval = st.sidebar.selectbox("Telegram監聽刷新間隔（秒）", [5, 10, 15, 30], index=1, disabled=not enable_tg)
+if enable_tg:
+    st.sidebar.caption("Telegram輪詢由目前開啟的頁面驅動；頁面關閉或手機休眠時不會在背景監聽。")
+tg_delay_sec = st.sidebar.number_input(
+    "開跑後幾多秒自動發送（秒）",
+    min_value=-300,
+    max_value=300,
+    value=30,
+    step=10,
+    help="預設 +30 代表預定開跑時間到再加 30 秒才發；如果想早 30 秒發可以填 -30。"
+)
+test_tg_clicked = st.sidebar.button("🔔 測試發送 Telegram", use_container_width=True)
 
 # ==========================================
 # 🛠️ 歷史賽果 15 大特徵資料抓取工具 (防彈升級版 + 賽道抓取)
@@ -975,6 +1006,201 @@ def fetch_live_odds(date_str, venue, race_no=None):
         return None, None, f"連線錯誤：{exc}"
     except (ValueError, TypeError, KeyError) as exc:
         return None, None, f"解析回應錯誤：{exc}"
+
+RACE_TIMES_QUERY = """query raceTimes($date: String, $venueCode: String) {
+  raceMeetings(date: $date, venueCode: $venueCode) {
+    races {
+      no
+      postTime
+    }
+  }
+}"""
+
+@st.cache_data(ttl=60)
+def fetch_race_post_times(date_str, venue):
+    """從 HKJC GraphQL 取得當日各場官方開跑時間"""
+    body = {
+        "operationName": "raceTimes",
+        "variables": {"date": date_str, "venueCode": venue},
+        "query": RACE_TIMES_QUERY,
+    }
+    try:
+        resp = requests.post(GRAPHQL_URL, headers=GRAPHQL_HEADERS, json=body, timeout=10)
+        resp.raise_for_status()
+        meetings = (resp.json().get("data") or {}).get("raceMeetings") or []
+        if not meetings:
+            return {}
+        times_map = {}
+        hk_tz = timezone(timedelta(hours=8))
+        for r in meetings[0].get("races") or []:
+            r_no = r.get("no")
+            pt = r.get("postTime")
+            if r_no is not None and pt:
+                dt = datetime.fromisoformat(str(pt).replace("Z", "+00:00")).astimezone(hk_tz)
+                times_map[int(r_no)] = dt.time()
+        return times_map
+    except Exception:
+        return {}
+
+@st.cache_resource
+def telegram_runtime_state():
+    """Process-wide polling cursor/lock and notification idempotency state."""
+    return {"lock": threading.Lock(), "offsets": {}, "deliveries": {}, "last_poll_error": None}
+
+def telegram_bot_key(bot_token):
+    return hashlib.sha256(str(bot_token).strip().encode("utf-8")).hexdigest()
+
+def sanitize_telegram_error(error, bot_token=""):
+    text = str(error)
+    if bot_token:
+        text = text.replace(str(bot_token).strip(), "[TOKEN已遮蔽]")
+    return re.sub(r"(/bot)[^/]+(/)", r"\1[TOKEN已遮蔽]\2", text)
+
+def send_telegram_alert(bot_token, chat_id, message):
+    if not bot_token or not chat_id:
+        return False, "缺少 Bot Token 或 Chat ID"
+    if len(message) > 4096:
+        return False, "訊息超過 Telegram 4096 字元上限，未有發送。"
+    url = f"https://api.telegram.org/bot{bot_token.strip()}/sendMessage"
+    payload = {"chat_id": str(chat_id).strip(), "text": message, "parse_mode": "HTML"}
+    try:
+        resp = requests.post(url, json=payload, timeout=(3, 8))
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if resp.status_code == 200 and body.get("ok") is True:
+            return True, "發送成功"
+        if resp.status_code >= 500:
+            description = body.get("description") or f"HTTP {resp.status_code}"
+            return False, f"送達結果不確定（Telegram伺服器回應）：{sanitize_telegram_error(description, bot_token)}"
+        description = body.get("description") or f"HTTP {resp.status_code}"
+        return False, sanitize_telegram_error(description, bot_token)
+    except requests.RequestException as exc:
+        # A timeout may happen after Telegram accepted the message: callers must not
+        # blindly retry it, or duplicate messages can be sent.
+        return False, f"送達結果不確定（網絡逾時／連線錯誤）：{sanitize_telegram_error(exc, bot_token)}"
+    except Exception as exc:
+        return False, sanitize_telegram_error(exc, bot_token)
+
+def claim_telegram_delivery(bot_token, chat_id, delivery_key):
+    state = telegram_runtime_state()
+    key = f"{telegram_bot_key(bot_token)}:{str(chat_id).strip()}:{delivery_key}"
+    now = time.time()
+    with state["lock"]:
+        prior = state["deliveries"].get(key, {})
+        status = prior.get("status")
+        if status in ("sending", "sent", "uncertain"):
+            return None, status
+        if status == "failed" and now < prior.get("retry_after", 0):
+            return None, "backoff"
+        state["deliveries"][key] = {"status": "sending", "updated_at": now}
+    return key, "claimed"
+
+def finish_telegram_delivery(delivery_key, status, detail=""):
+    if not delivery_key:
+        return
+    state = telegram_runtime_state()
+    with state["lock"]:
+        state["deliveries"][delivery_key] = {
+            "status": status,
+            "detail": detail,
+            "updated_at": time.time(),
+            "retry_after": time.time() + 60 if status == "failed" else 0,
+        }
+
+def check_telegram_command(bot_token, chat_id):
+    """讀取指定Chat最近90秒訊息；Bot update游標於程序共用，避免多Session搶輪詢。"""
+    if not bot_token or not chat_id:
+        return []
+    state = telegram_runtime_state()
+    bot_key = telegram_bot_key(bot_token)
+    if not state["lock"].acquire(blocking=False):
+        return []
+    try:
+        params = {"timeout": 0, "allowed_updates": json.dumps(["message"])}
+        if bot_key in state["offsets"]:
+            params["offset"] = state["offsets"][bot_key]
+        url = f"https://api.telegram.org/bot{bot_token.strip()}/getUpdates"
+        resp = requests.get(url, params=params, timeout=(2, 4))
+        body = resp.json()
+        if resp.status_code != 200 or body.get("ok") is not True:
+            state["last_poll_error"] = sanitize_telegram_error(
+                body.get("description") or f"HTTP {resp.status_code}", bot_token
+            )
+            return []
+        state["last_poll_error"] = None
+        results = body.get("result", [])
+        commands = []
+        latest_update_id = None
+        now_ts = time.time()
+        for item in results:
+            upd_id = item.get("update_id")
+            if upd_id is not None:
+                latest_update_id = max(latest_update_id or upd_id, upd_id)
+            msg = item.get("message") or {}
+            from_chat = str((msg.get("chat") or {}).get("id", ""))
+            msg_date = msg.get("date", 0)
+            if from_chat == str(chat_id).strip() and 0 <= now_ts - msg_date <= 90:
+                text = str(msg.get("text", "")).strip()
+                if text:
+                    commands.append(text[:200])
+        if latest_update_id is not None:
+            state["offsets"][bot_key] = latest_update_id + 1
+        return commands[-5:]
+    except (requests.RequestException, ValueError, TypeError, KeyError) as exc:
+        state["last_poll_error"] = sanitize_telegram_error(exc, bot_token)
+        return []
+    finally:
+        state["lock"].release()
+
+def format_tg_split_message(race_id, sorted_win, sorted_place, qp_pick, trigger_label):
+    """將 WIN、PLA、QP 分開排版"""
+    if len(sorted_win) >= 1:
+        w = sorted_win.iloc[0]
+        win_block = (
+            f"<b>{html.escape(str(w['馬號']))}號 {html.escape(str(w['馬名']))}</b>\n"
+            f"AI勝率：{w['pred_win_prob']*100:.1f}%｜獨EV：{w['win_ev']:.2f}\n"
+            f"賠率：{w['基準賠率']:.1f} ➔ <b>{w['獨贏賠率']:.1f}</b> ({html.escape(str(w['資金流向']))})"
+        )
+    else:
+        win_block = "⚠️ 無達標獨贏馬"
+
+    if len(sorted_place) >= 1:
+        p = sorted_place.iloc[0]
+        p_odds = p['位置賠率（預測／EV用）']
+        p_odds_str = f"{p_odds:.2f} ({html.escape(str(p['位置賠率來源']))})" if pd.notna(p_odds) else "未有報價"
+        pla_block = (
+            f"<b>{html.escape(str(p['馬號']))}號 {html.escape(str(p['馬名']))}</b>\n"
+            f"AI入位率：{p['pred_place_prob']*100:.1f}%｜位EV：{p['place_ev']:.2f}\n"
+            f"位置價：{p_odds_str}"
+        )
+    else:
+        pla_block = "⚠️ 無達標位置馬"
+
+    qp_block = html.escape(str(qp_pick)) if qp_pick else "⚠️ 無達標 QP 組合"
+
+    return (
+        f"🐎 <b>HKJC AI 心水 | {html.escape(str(race_id))}</b>\n"
+        f"<i>({html.escape(str(trigger_label))})</i>\n\n"
+        f"🥇 <b>【獨贏 WIN】</b>\n{win_block}\n\n"
+        f"🥈 <b>【位置 PLA】</b>\n{pla_block}\n\n"
+        f"🔗 <b>【位置Q QP】</b>\n{qp_block}"
+    )
+
+if test_tg_clicked:
+    test_ok, test_detail = send_telegram_alert(
+        tg_token, tg_chat_id,
+        "✅ <b>HKJC AI 系統連線成功！</b>\n賽事日將會透過這裡通知你心水馬匹。"
+    )
+    st.session_state['telegram_test_result'] = (
+        test_ok,
+        "測試訊息已發送，請檢查Telegram！" if test_ok else f"測試發送失敗：{test_detail}"
+    )
+    if test_ok:
+        st.sidebar.success(st.session_state['telegram_test_result'][1])
+    else:
+        st.sidebar.error(st.session_state['telegram_test_result'][1])
 
 # ==========================================
 # 決定讀取哪一份賽卡資料
@@ -1739,13 +1965,47 @@ with tab1:
     else:
         auto_date = datetime.now().strftime("%Y-%m-%d")
     api_date = col_d.text_input("API 查詢日期 (YYYY-MM-DD)", value=auto_date, key=f"api_date_{prediction_signature}")
+    try:
+        race_date = datetime.strptime(api_date.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        st.error("API 日期格式必須是 YYYY-MM-DD。")
+        st.stop()
 
     race_series = df_raw['賽事編號'].map(extract_race_no)
     races_available = sorted(int(x) for x in race_series.dropna().unique())
-    if races_available:
-        target_race = col_r.selectbox("當前操作／查看場次", races_available, key="target_race_select")
+    post_times_map = fetch_race_post_times(api_date.strip(), venue_code)
+
+    st.markdown("#### 🤖 掛機自動換場")
+    auto_next_col, auto_help_col = st.columns([1.5, 3.5])
+    auto_next_race = auto_next_col.checkbox(
+        "啟用掛機：自動更新時間及場次", value=False, key="auto_next_race_enabled"
+    )
+    auto_next_interval = 10  # 固定10秒執行一次場次判斷
+    auto_help_col.caption("啟用後每10秒重跑畫面、檢查官方開跑時間並自動轉場；不會因此更新賠率。需保持此頁開啟，手機訊息另需啟用側欄Telegram通知。")
+    if auto_next_race:
+        if not post_times_map:
+            st.warning("暫時未取得HKJC官方開跑時間；系統會繼續重試，但未取得前不能準確自動換場。")
+        else:
+            missing_post_times = [r for r in races_available if int(r) not in post_times_map]
+            if missing_post_times:
+                st.warning(f"以下賽事未有官方開跑時間，換場判斷可能不完整：{', '.join(map(str, missing_post_times))}。")
+    if auto_next_race and post_times_map and races_available:
+        now_dt = datetime.now(hk_timezone)
+        next_race = races_available[-1]
+        for r_no in races_available:
+            pt = post_times_map.get(int(r_no))
+            if pt:
+                pt_dt = datetime.combine(race_date, pt).replace(tzinfo=hk_timezone) + timedelta(minutes=2)
+                if now_dt < pt_dt:
+                    next_race = r_no
+                    break
+        target_race = next_race
+        col_r.success(f"🤖 掛機監測中：第 {target_race} 場")
     else:
-        target_race = col_r.number_input("當前操作／查看場次", min_value=1, max_value=15, value=1, step=1)
+        if races_available:
+            target_race = col_r.selectbox("當前操作／查看場次", races_available, key="target_race_select")
+        else:
+            target_race = col_r.number_input("當前操作／查看場次", min_value=1, max_value=15, value=1, step=1)
 
     selected_race_rows = df[df['賽事編號'].map(extract_race_no) == int(target_race)].copy()
     selected_race_win = pd.to_numeric(selected_race_rows.get('獨贏賠率', pd.Series(index=selected_race_rows.index, dtype=float)), errors='coerce')
@@ -1775,13 +2035,12 @@ with tab1:
             f"已有AI分數 {int((selected_race_scored & selected_race_active).sum())}/{int(selected_race_active.sum())} 匹有效參賽馬。"
         )
 
-    target_time = col_t.time_input("預定開跑時間", value=datetime.strptime("18:45", "%H:%M").time())
-    
-    try:
-        race_date = datetime.strptime(api_date.strip(), "%Y-%m-%d").date()
-    except ValueError:
-        st.error("API 日期格式必須是 YYYY-MM-DD。")
-        st.stop()
+    auto_post_time = post_times_map.get(int(target_race), datetime.strptime("18:45", "%H:%M").time())
+    target_time = col_t.time_input(
+        "預定開跑時間（自動抓取）",
+        value=auto_post_time,
+        key=f"target_time_{api_date.strip()}_{venue_code}_{int(target_race)}_{auto_post_time:%H%M}"
+    )
 
     target_datetime = datetime.combine(race_date, target_time).replace(tzinfo=hk_timezone)
     target_iso = target_datetime.isoformat()
@@ -1878,12 +2137,22 @@ with tab1:
         st.session_state['baseline_locked_time'] = datetime.now(hk_timezone).strftime("%H:%M:%S")
         st.rerun()
 
+    refresh_intervals = []
     if auto_refresh and not archived_prediction_card:
-        st_autorefresh(interval=int(refresh_seconds * 1000), key="hkjc_live_odds_autorefresh")
+        refresh_intervals.append(int(refresh_seconds * 1000))
+    if auto_next_race and not archived_prediction_card:
+        refresh_intervals.append(int(auto_next_interval * 1000))
+    if enable_tg and tg_token and tg_chat_id and not archived_prediction_card:
+        refresh_intervals.append(int(tg_poll_interval * 1000))
+    if refresh_intervals:
+        st_autorefresh(interval=min(refresh_intervals), key="hkjc_live_odds_telegram_autorefresh")
 
-    if (auto_refresh or manual_refresh) and is_target_frozen:
+    last_odds_fetch = st.session_state.get('last_auto_odds_fetch_epoch', 0)
+    odds_refresh_due = auto_refresh and (time.time() - last_odds_fetch >= int(refresh_seconds))
+    if (odds_refresh_due or manual_refresh) and is_target_frozen:
         st.info(f"第 {target_race} 場已凍結；本輪不會送出賠率請求。")
-    elif auto_refresh or manual_refresh:
+    elif odds_refresh_due or manual_refresh:
+        st.session_state['last_auto_odds_fetch_epoch'] = time.time()
         with st.spinner(f"正在讀取第 {target_race} 場 WIN／PLACE 即時賠率…"):
             live_by_race, server_updated_at, error = fetch_live_odds(api_date, venue_code, int(target_race))
 
@@ -1940,11 +2209,10 @@ with tab1:
             st.session_state['odds_last_status'] = f"✅ 成功更新 {updated_races_count} 場最新賠率 {skip_msg}（時間：{datetime.now(hk_timezone).strftime('%H:%M:%S')}）。"
             st.session_state['odds_server_time'] = server_updated_at
             st.session_state['odds_last_error'] = None
-            if manual_refresh: st.rerun()
+            st.rerun()
         else:
             st.session_state['odds_last_error'] = f"⚠️ 無法取得賠率：{error}"
             st.session_state['odds_last_status'] = None
-            if manual_refresh: st.rerun()
 
     locked_time_str = st.session_state.get('baseline_locked_time', '未鎖定')
     form_mode_str = f"WIN:{'Dynamic' if win_dynamic_form else 'Fixed'} / PLACE:{'Dynamic' if place_dynamic_form else 'Fixed'} / QP:{qp_choice}"
@@ -1960,6 +2228,7 @@ with tab1:
     st.subheader("🎯 各場次 AI 雙渦輪智慧投注推薦清單")
 
     recommendations = []
+    race_tg_payloads = {}
     for race_id, group in df.groupby('賽事編號'):
         r_no = extract_race_no(race_id)
         freeze_badge = f"🔒 已凍結 ({st.session_state['frozen_races'][r_no]})" if r_no in st.session_state['frozen_races'] else "🟢 即時跳動中"
@@ -2010,6 +2279,9 @@ with tab1:
         else:
             qp_pick = "⚠️ 至少需要兩匹有有效PLACE模型分數才可組QP"
 
+        if r_no is not None:
+            race_tg_payloads[int(r_no)] = (race_id, sorted_win, sorted_place, qp_pick)
+
         if len(sorted_win) >= 1 or len(sorted_place) >= 1:
             ref_row = sorted_win.iloc[0] if len(sorted_win) >= 1 else sorted_place.iloc[0]
             if hot_str == "-":
@@ -2032,6 +2304,68 @@ with tab1:
         st.warning("⚠️ 沒有符合當前篩選條件的馬匹。")
     else:
         st.dataframe(rec_df, use_container_width=True, hide_index=True)
+
+    # === ✈️ Telegram雙觸發：賽前／後定時推送及手機訊號查詢 ===
+    if enable_tg and not archived_prediction_card and tg_token and tg_chat_id:
+        now_dt = datetime.now(hk_timezone)
+        cur_race = int(target_race)
+        tg_status_messages = []
+
+        # 逐場依官方開跑時間觸發；所選場次可用畫面上的手動時間覆寫。
+        # 以包含日期和場地的完整Race ID作唯一鍵，跨Session共享去重狀態。
+        for race_no, (r_id, s_win, s_pla, q_txt) in race_tg_payloads.items():
+            race_post_time = target_time if int(race_no) == cur_race else post_times_map.get(int(race_no))
+            if race_post_time is None:
+                continue
+            post_dt = datetime.combine(race_date, race_post_time).replace(tzinfo=hk_timezone)
+            trigger_dt = post_dt + timedelta(seconds=int(tg_delay_sec))
+            if not (trigger_dt <= now_dt <= trigger_dt + timedelta(minutes=5)):
+                continue
+            delivery_id = f"auto:{venue_code}:{normalize_race_id(r_id)}"
+            claim_key, claim_status = claim_telegram_delivery(tg_token, tg_chat_id, delivery_id)
+            if claim_key:
+                msg = format_tg_split_message(
+                    r_id, s_win, s_pla, q_txt, f"⏰ 開跑{int(tg_delay_sec):+d}秒自動推送"
+                )
+                ok, detail = send_telegram_alert(tg_token, tg_chat_id, msg)
+                final_status = "sent" if ok else ("uncertain" if detail.startswith("送達結果不確定") else "failed")
+                finish_telegram_delivery(claim_key, final_status, detail)
+                if ok:
+                    tg_status_messages.append(f"自動通知已送出：{r_id}")
+                else:
+                    tg_status_messages.append(f"通知未確認送達：{r_id}；{detail}。已避免逾時後盲目重送。")
+            elif claim_status == "backoff":
+                tg_status_messages.append(f"{r_id}上一輪通知失敗，系統等待60秒後再試。")
+            elif claim_status == "uncertain":
+                reported = st.session_state.setdefault('tg_uncertain_reported', set())
+                if delivery_id not in reported:
+                    reported.add(delivery_id)
+                    tg_status_messages.append(f"{r_id}送達狀態不確定；為避免重複通知不會自動重送，請先查看Telegram。")
+
+        # 手機傳訊息查詢：逐條處理最近90秒內、來自設定Chat的訊息。
+        for cmd in check_telegram_command(tg_token, tg_chat_id):
+            m_race = re.search(r'(\d+)', cmd)
+            parsed_race = int(m_race.group(1)) if m_race else None
+            req_race = parsed_race if parsed_race in race_tg_payloads else cur_race
+            if req_race not in race_tg_payloads:
+                continue
+            r_id, s_win, s_pla, q_txt = race_tg_payloads[req_race]
+            msg = format_tg_split_message(
+                r_id, s_win, s_pla, q_txt, f"📲 收到訊號「{cmd}」即時回覆"
+            )
+            ok, detail = send_telegram_alert(tg_token, tg_chat_id, msg)
+            if not ok:
+                tg_status_messages.append(f"Telegram指令回覆發送失敗：{detail}")
+        poll_error = telegram_runtime_state().get('last_poll_error')
+        if poll_error:
+            tg_status_messages.append(f"Telegram指令監聽暫時失敗：{poll_error}")
+        if tg_status_messages:
+            st.session_state['tg_status_message'] = "；".join(tg_status_messages)
+            st.session_state['tg_status_message_time'] = time.time()
+        elif st.session_state.get('tg_status_message_time', 0) < time.time() - 300:
+            st.session_state.pop('tg_status_message', None)
+        if st.session_state.get('tg_status_message'):
+            st.info(st.session_state['tg_status_message'])
 
     # 單場深度資金與實力雷達表 (同時顯示雙模型機率與雙 EV)
     status_tag = f"🔒 已凍結於 {st.session_state['frozen_races'][int(target_race)]}" if is_target_frozen else "🟢 盤口即時更新中"
