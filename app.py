@@ -1016,7 +1016,7 @@ RACE_TIMES_QUERY = """query raceTimes($date: String, $venueCode: String) {
   }
 }"""
 
-@st.cache_data(ttl=60)
+@st.cache_data(ttl=10)
 def fetch_race_post_times(date_str, venue):
     """從 HKJC GraphQL 取得當日各場官方開跑時間"""
     body = {
@@ -1973,7 +1973,17 @@ with tab1:
 
     race_series = df_raw['賽事編號'].map(extract_race_no)
     races_available = sorted(int(x) for x in race_series.dropna().unique())
+    post_time_refresh_col, post_time_hint_col = st.columns([1.7, 4.3])
+    refresh_post_times = post_time_refresh_col.button(
+        "🔄 立即重新抓取開跑時間",
+        key=f"refresh_post_times_{api_date.strip()}_{venue_code}",
+        help="清除時間查詢快取，立即重新向 HKJC 查詢官方預定開跑時間。",
+        use_container_width=True,
+    )
+    if refresh_post_times:
+        fetch_race_post_times.clear()
     post_times_map = fetch_race_post_times(api_date.strip(), venue_code)
+    post_time_hint_col.caption("自動查詢快取約10秒；若要即時重查，可按左側按鈕。")
 
     st.markdown("#### 🤖 掛機自動換場")
     auto_next_col, auto_help_col = st.columns([1.5, 3.5])
